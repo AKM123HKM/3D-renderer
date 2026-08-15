@@ -9,9 +9,9 @@ constexpr float VIEWPORT_W = 1;
 constexpr float VIEWPORT_H = 1;
 
 sf::Color multiplyColorWithIntensity(sf::Color color,float intensity){
-    int r = static_cast<int>(color.r) * intensity;
-    int g = static_cast<int>(color.g) * intensity;
-    int b = static_cast<int>(color.b) * intensity;
+    int r = std::min(static_cast<int>(color.r) * intensity,255.f);
+    int g = std::min(static_cast<int>(color.g) * intensity,255.f);
+    int b = std::min(static_cast<int>(color.b) * intensity,255.f);
     return sf::Color(r,g,b);
 }
 
@@ -35,8 +35,9 @@ struct Sphere{
     sf::Vector3f position = sf::Vector3f(0,0,0);
     sf::Color color = sf::Color(0,0,0);;
     int radius = 0;
+    int specular = -1;
 
-    Sphere(sf::Vector3f Apos,sf::Color Acolor,int Aradius): position(Apos),color(Acolor),radius(Aradius){}
+    Sphere(sf::Vector3f Apos,sf::Color Acolor,int Aradius,int Aspecular): position(Apos),color(Acolor),radius(Aradius),specular(Aspecular){}
 
     Sphere() = default;
 
@@ -75,28 +76,6 @@ sf::Vector3f canvasToViewPort(int x,int y){
     return sf::Vector3f(Vx,Vy,1);
 }
 
-float computeLighthing(sf::Vector3f P,sf::Vector3f N,std::vector<Light> lights){
-    float i = 0;
-    for(auto light:lights){
-        if(light.type == Ambient){
-            i += light.intensity;
-        }
-        else{
-            sf::Vector3f L;
-            if(light.type == Point){
-                L = light.dirOrPos - P;
-            }
-            else{
-                L = light.dirOrPos;
-            }
-            if(!(dotProduct(L,N) < 0 || magnitude(L) == 0 || magnitude(N) == 0)){
-                i += light.intensity * dotProduct(L,N)/(magnitude(L) * magnitude(N));
-            }
-        }
-    }
-    return i;
-}
-
 std::pair<float,float> intersectRaySphere(sf::Vector3f origin,sf::Vector3f ViewPortCoords,Sphere sphere){
     sf::Vector3f CO = origin - sphere.position;
     float a = dotProduct(ViewPortCoords,ViewPortCoords);
@@ -113,12 +92,12 @@ std::pair<float,float> intersectRaySphere(sf::Vector3f origin,sf::Vector3f ViewP
     return {t1,t2};
 }
 
-sf::Color traceRay(sf::Vector3f origin,sf::Vector3f ViewPortCoords,float t_min,float t_max,std::vector<Sphere> spheres,std::vector<Light> lights){
+std::pair<Sphere,float> closestIntersection(sf::Vector3f origin, sf::Vector3f viewPortCoords,float t_min,float t_max,std::vector<Sphere> spheres){
     float closest_t = INFINITY;
     Sphere closest_sphere;
 
     for (auto sphere:spheres){
-        auto [t1,t2] = intersectRaySphere(origin,ViewPortCoords,sphere);  
+        auto [t1,t2] = intersectRaySphere(origin,viewPortCoords,sphere);  
         
         if(t1 >= t_min & t1 <= t_max & t1 < closest_t){
             closest_t = t1;
@@ -129,10 +108,55 @@ sf::Color traceRay(sf::Vector3f origin,sf::Vector3f ViewPortCoords,float t_min,f
             closest_sphere = sphere;
         }
     }
+    
+    return {closest_sphere,closest_t};
+}
+
+float computeLighthing(sf::Vector3f P,sf::Vector3f N,sf::Vector3f origin,int s,std::vector<Light> lights,std::vector<Sphere> spheres){
+    float i = 0;
+    for(auto light:lights){
+        if(light.type == Ambient){
+            i += light.intensity;
+        }
+        else{
+            sf::Vector3f L;
+            float t_max;
+            if(light.type == Point){
+                L = light.dirOrPos - P;
+                t_max = 1;
+            }
+            else{
+                L = light.dirOrPos;
+                t_max = INFINITY;
+            }
+
+            auto [shadow_sphere,shadow_t] = closestIntersection(P,L,0.001,t_max,spheres);
+            if(!(shadow_sphere.isNull())){
+                continue;
+            }
+
+            if(!(dotProduct(L,N) < 0 || magnitude(L) == 0 || magnitude(N) == 0)){
+                i += light.intensity * dotProduct(L,N)/(magnitude(L) * magnitude(N));
+            }
+
+            if(!(s == -1)){
+                sf::Vector3f R = 2.f*N*dotProduct(N,L) - L;
+                sf::Vector3f V = origin - P;
+                if(!(dotProduct(R,V) < 0 || magnitude(R) == 0 || magnitude(V) == 0)){
+                    i += light.intensity * pow(dotProduct(R,V)/(magnitude(R) * magnitude(V)),100);
+                }
+            }
+        }
+    }
+    return i;
+}
+
+sf::Color traceRay(sf::Vector3f origin,sf::Vector3f ViewPortCoords,float t_min,float t_max,std::vector<Sphere> spheres,std::vector<Light> lights){
+    auto [closest_sphere,closest_t] = closestIntersection(origin,ViewPortCoords,t_min,t_max,spheres);
     if(!(closest_sphere.isNull())){
         sf::Vector3f P = origin + closest_t*(ViewPortCoords);
         sf::Vector3f N = P - closest_sphere.position;
-        return multiplyColorWithIntensity(closest_sphere.color,computeLighthing(P,normalize(N),lights));
+        return multiplyColorWithIntensity(closest_sphere.color,computeLighthing(P,normalize(N),origin,closest_sphere.specular,lights,spheres));
     }
     return sf::Color::White;
 }
@@ -151,16 +175,19 @@ int main() {
     
     // Objects in the scene
     std::vector<Sphere> spheres;
-    spheres.emplace_back(sf::Vector3f(0,-1,3),sf::Color::Red,1);
-    spheres.emplace_back(sf::Vector3f(2,0,4),sf::Color::Green,1);
-    spheres.emplace_back(sf::Vector3f(-2,0,4),sf::Color::Blue,1);
-    spheres.emplace_back(sf::Vector3f(0,-5001,0),sf::Color::Yellow,5000);
+    spheres.emplace_back(sf::Vector3f(0,-1,3),sf::Color::Red,1,500);
+    spheres.emplace_back(sf::Vector3f(2,0,4),sf::Color::Green,1,500);
+    spheres.emplace_back(sf::Vector3f(-2,0,4),sf::Color::Blue,1,10);
+    spheres.emplace_back(sf::Vector3f(0,-5001,0),sf::Color::Yellow,5000,1000);
+    // spheres.emplace_back(sf::Vector3f(0,2,4),sf::Color::Green,1,500);
+    // spheres.emplace_back(sf::Vector3f(0,-0.5,4),sf::Color::Blue,1,500);
 
     //Lights in the scene
     std::vector<Light> lights;
-    lights.emplace_back(Point,0.6,sf::Vector3f(2,1,0));
-    lights.emplace_back(Ambient,0.2);
-    lights.emplace_back(Directional,0.2,sf::Vector3f(1,4,4));
+    lights.emplace_back(Point,0.4,sf::Vector3f(5,0,-4));
+    // lights.emplace_back(Ambient,0.1);
+    lights.emplace_back(Directional,0.4,sf::Vector3f(1,4,4));
+    // lights.emplace_back(Directional,0.6,sf::Vector3f(0,1,0));
 
     while (window.isOpen()) {
         fps.setString(std::to_string(1/clock.getElapsedTime().asSeconds()));
