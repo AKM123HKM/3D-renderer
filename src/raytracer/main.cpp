@@ -15,6 +15,13 @@ sf::Color multiplyColorWithIntensity(sf::Color color,float intensity){
     return sf::Color(r,g,b);
 }
 
+sf::Color addColors(sf::Color c1, sf::Color c2){
+    int r = std::min(static_cast<int>(c1.r) + static_cast<int>(c2.r),255);
+    int g = std::min(static_cast<int>(c1.g) + static_cast<int>(c2.g),255);
+    int b = std::min(static_cast<int>(c1.b) + static_cast<int>(c2.b),255);
+    return sf::Color(r,g,b);
+}
+
 float dotProduct(sf::Vector3f v1, sf::Vector3f v2){
     return v1.x * v2.x + v1.y * v2.y + v1.z * v2.z;
 }
@@ -31,13 +38,18 @@ sf::Vector3f normalize(sf::Vector3f v){
     return sf::Vector3f(-1,-1,-1);
 }
 
+sf::Vector3f reflect(sf::Vector3f v, sf::Vector3f n){
+    return 2.f*normalize(n)*dotProduct(normalize(n),v) - v;
+}
+
 struct Sphere{
     sf::Vector3f position = sf::Vector3f(0,0,0);
     sf::Color color = sf::Color(0,0,0);;
     int radius = 0;
     int specular = -1;
+    float reflectivness = 0.f;
 
-    Sphere(sf::Vector3f Apos,sf::Color Acolor,int Aradius,int Aspecular): position(Apos),color(Acolor),radius(Aradius),specular(Aspecular){}
+    Sphere(sf::Vector3f Apos,sf::Color Acolor,int Aradius,int Aspecular,float Areflectivness): position(Apos),color(Acolor),radius(Aradius),specular(Aspecular),reflectivness(Areflectivness){}
 
     Sphere() = default;
 
@@ -140,7 +152,7 @@ float computeLighthing(sf::Vector3f P,sf::Vector3f N,sf::Vector3f origin,int s,s
             }
 
             if(!(s == -1)){
-                sf::Vector3f R = 2.f*N*dotProduct(N,L) - L;
+                sf::Vector3f R = reflect(L,N);
                 sf::Vector3f V = origin - P;
                 if(!(dotProduct(R,V) < 0 || magnitude(R) == 0 || magnitude(V) == 0)){
                     i += light.intensity * pow(dotProduct(R,V)/(magnitude(R) * magnitude(V)),100);
@@ -151,23 +163,31 @@ float computeLighthing(sf::Vector3f P,sf::Vector3f N,sf::Vector3f origin,int s,s
     return i;
 }
 
-sf::Color traceRay(sf::Vector3f origin,sf::Vector3f ViewPortCoords,float t_min,float t_max,std::vector<Sphere> spheres,std::vector<Light> lights){
+sf::Color traceRay(sf::Vector3f origin,sf::Vector3f ViewPortCoords,float t_min,float t_max,std::vector<Sphere> spheres,std::vector<Light> lights,int recursion_depth){
     auto [closest_sphere,closest_t] = closestIntersection(origin,ViewPortCoords,t_min,t_max,spheres);
     if(!(closest_sphere.isNull())){
         sf::Vector3f P = origin + closest_t*(ViewPortCoords);
         sf::Vector3f N = P - closest_sphere.position;
-        return multiplyColorWithIntensity(closest_sphere.color,computeLighthing(P,normalize(N),origin,closest_sphere.specular,lights,spheres));
+        sf::Color local_color = multiplyColorWithIntensity(closest_sphere.color,computeLighthing(P,normalize(N),origin,closest_sphere.specular,lights,spheres));
+        if(closest_sphere.reflectivness){
+            sf::Vector3f R = reflect(-1.f*ViewPortCoords,N);
+            if(recursion_depth >= 0 & closest_sphere.reflectivness >= 0){
+                sf::Color reflected_color = traceRay(ViewPortCoords,R,0.001,INFINITY,spheres,lights,recursion_depth - 1);
+                return addColors(multiplyColorWithIntensity(local_color,(1 - closest_sphere.reflectivness)),multiplyColorWithIntensity(reflected_color,closest_sphere.reflectivness));
+            }
+        }
+        return local_color;
     }
-    return sf::Color::White;
+    return sf::Color::Black;
 }
 
 int main() {
-    sf::RenderWindow window(sf::VideoMode({WIDTH,HEIGHT}), "SFML 3 Test");
+    sf::RenderWindow window(sf::VideoMode({WIDTH,HEIGHT}), "Raytracer");
     sf::Clock clock;
     const sf::Font font("../assets/PoetsenOne-Regular.ttf");
     sf::Text fps(font);
     fps.setCharacterSize(30);
-    fps.setFillColor(sf::Color::Black);
+    fps.setFillColor(sf::Color::White);
     fps.setPosition(sf::Vector2f(0,0));
     
     // Camera position
@@ -175,17 +195,17 @@ int main() {
     
     // Objects in the scene
     std::vector<Sphere> spheres;
-    spheres.emplace_back(sf::Vector3f(0,-1,3),sf::Color::Red,1,500);
-    spheres.emplace_back(sf::Vector3f(2,0,4),sf::Color::Green,1,500);
-    spheres.emplace_back(sf::Vector3f(-2,0,4),sf::Color::Blue,1,10);
-    spheres.emplace_back(sf::Vector3f(0,-5001,0),sf::Color::Yellow,5000,1000);
+    spheres.emplace_back(sf::Vector3f(0,-1,3),sf::Color::Red,1,500,0.2);
+    spheres.emplace_back(sf::Vector3f(2,0,4),sf::Color::Green,1,500,0.3);
+    spheres.emplace_back(sf::Vector3f(-2,0,4),sf::Color::Blue,1,10,0.4);
+    spheres.emplace_back(sf::Vector3f(0,-5001,0),sf::Color::Yellow,5000,1000,0.5);
     // spheres.emplace_back(sf::Vector3f(0,2,4),sf::Color::Green,1,500);
     // spheres.emplace_back(sf::Vector3f(0,-0.5,4),sf::Color::Blue,1,500);
 
     //Lights in the scene
     std::vector<Light> lights;
-    lights.emplace_back(Point,0.4,sf::Vector3f(5,0,-4));
-    // lights.emplace_back(Ambient,0.1);
+    lights.emplace_back(Point,0.6,sf::Vector3f(5,0,-4));
+    lights.emplace_back(Ambient,0.2);
     lights.emplace_back(Directional,0.4,sf::Vector3f(1,4,4));
     // lights.emplace_back(Directional,0.6,sf::Vector3f(0,1,0));
 
@@ -200,10 +220,10 @@ int main() {
         window.clear(sf::Color::Black);
         sf::VertexArray frame(sf::PrimitiveType::Points);
         frame.resize(WIDTH*HEIGHT);
-        for(int x = -WIDTH/2; x <= WIDTH/2; x++){
-            for(int y = -HEIGHT/2; y <= HEIGHT/2; y++){
+        for(int x = -WIDTH/2; x <= WIDTH/2; x ++){
+            for(int y = -HEIGHT/2; y <= HEIGHT/2; y ++){
                 sf::Vector3f D = canvasToViewPort(x,y);
-                sf::Color color = traceRay(origin,D,1,INFINITY,spheres,lights);
+                sf::Color color = traceRay(origin,D,1,INFINITY,spheres,lights,2);
                 frame.append(getPixel(x,y,color));
             }
         }
