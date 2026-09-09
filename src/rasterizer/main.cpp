@@ -6,8 +6,8 @@
 
 constexpr int WIDTH = 800;
 constexpr int HEIGHT = 800;
-constexpr int VIEWPORT_W = 4;
-constexpr int VIEWPORT_H = 4;
+constexpr int VIEWPORT_W = 1;
+constexpr int VIEWPORT_H = 1;
 constexpr float pi = 3.14159;
 using Matrix = std::array<std::array<float, 4>, 4>;
 using Object = std::vector<std::vector<sf::VertexArray>>;
@@ -325,7 +325,7 @@ int main() {
     sf::Text fps(font);
     sf::Vector3f camera_pos = sf::Vector3f(0,0,0);
     std::array<float,3> camera_orientation {0,0,0};
-    sf::Vector3f viewport_pos = sf::Vector3f(0,0,4);
+    sf::Vector3f viewport_pos = sf::Vector3f(0,0,1);
     fps.setCharacterSize(30);
     fps.setFillColor(sf::Color::Black);
     fps.setPosition(sf::Vector2f(0,0));
@@ -368,38 +368,38 @@ int main() {
     instances.push_back(
         Instance{
             &cube,
-            sf::Vector3f(-7.0f,  4.0f,  4.0f),
+            sf::Vector3f(-3.0f,  2.5f, 10.0f),
             {20.0f, 30.0f, 10.0f},
-            1.3f
+            0.9f
         }
     );
 
     instances.push_back(
         Instance{
             &cube,
-            sf::Vector3f(7.0f,  4.0f, 6.0f),
+            sf::Vector3f(3.0f,  2.0f, 12.0f),
             {0.0f, 45.0f, 20.0f},
-            1.0f
+            1.1f
         }
     );
 
     instances.push_back(
         Instance{
             &cube,
-            sf::Vector3f(-6.0f, -5.0f, 8.0f),
+            sf::Vector3f(-3.0f, -2.5f, 14.0f),
             {30.0f, 10.0f, 45.0f},
-            1.0f
+            0.8f
         }
     );
 
     instances.push_back(
         Instance{
             &cube,
-            sf::Vector3f(6.0f, -4.0f, 15.0f),
+            sf::Vector3f(3.0f, -2.0f, 16.0f),
             {45.0f, 20.0f, 0.0f},
             1.0f
         }
-);
+    );
 
     while (window.isOpen()) {
         fps.setString(std::to_string(1/clock.getElapsedTime().asSeconds()));
