@@ -6,11 +6,12 @@
 
 constexpr int WIDTH = 800;
 constexpr int HEIGHT = 800;
-constexpr int VIEWPORT_W = 2;
-constexpr int VIEWPORT_H = 2;
+constexpr float VIEWPORT_W = 2;
+constexpr float VIEWPORT_H = 2;
 constexpr float pi = 3.14159;
 using Matrix = std::array<std::array<float, 4>, 4>;
-using Object = std::vector<std::vector<sf::VertexArray>>;
+using Object = std::vector<std::vector<std::vector<sf::Vertex>>>;
+using Triangle = std::pair<std::array<int,3>,sf::Color>;
 using TempTriangle = std::pair<std::array<sf::Vector3f,3>,sf::Color>;
 using TempTriangleProjected = std::pair<std::array<sf::Vector2f,3>,sf::Color>;
 using ClippingVolume = std::array<std::pair<sf::Vector3f,float>,5>;
@@ -151,14 +152,6 @@ Matrix getScalingMatrix(float scalar){
     return result;
 }
 
-struct Triangle{
-    std::array<int,3> indices;
-    sf::Color color;
-
-    Triangle():indices({0,0,0}),color(sf::Color::Black){}
-    Triangle(std::array<int,3> aIndices,sf::Color aColor):indices(aIndices),color(aColor){}
-};
-
 struct Model{
     std::vector<sf::Vector3f> vertices;
     std::vector<Triangle> triangles;
@@ -176,9 +169,9 @@ struct Instance{
         for (auto vertex :model_ptr->vertices){
             center += vertex;
         }
-        center *= float(model_ptr->vertices.size());
+        center /= float(model_ptr->vertices.size());
 
-        float radius;
+        float radius = 0.0f;
         float distance;
         for (auto vertex: model_ptr->vertices){
             distance = (center - vertex).length();
@@ -236,24 +229,6 @@ sf::Vector2f projectVector(sf::Vector3f vector, float viewport_z){
         (viewport_coords.y / VIEWPORT_H) * HEIGHT
     };
 
-    if (!std::isfinite(screen_coords.x) ||
-        !std::isfinite(screen_coords.y)) {
-
-        std::cout << "\nBAD PROJECTION\n";
-        std::cout << "3D: "
-                  << vector.x << ", "
-                  << vector.y << ", "
-                  << vector.z << '\n';
-
-        std::cout << "viewport: "
-                  << viewport_coords.x << ", "
-                  << viewport_coords.y << '\n';
-
-        std::cout << "screen: "
-                  << screen_coords.x << ", "
-                  << screen_coords.y << '\n';
-    }
-
     return screen_coords;
 }
 
@@ -275,8 +250,6 @@ sf::Color multiplyColorWithIntensity(sf::Color color,float intensity){
 
 std::vector<float> interpolate(float d1, float d2, float i1, float i2){
     std::vector<float> values;
-    // std::cout << "i1: " << i1 << " i2: " << i2
-    //       << " difference: " << i2 - i1 << '\n';
     values.reserve(static_cast<int>(i2 - i1) + 1);
     values.push_back(d1);
     if(i1 == i2){
@@ -291,16 +264,18 @@ std::vector<float> interpolate(float d1, float d2, float i1, float i2){
     return values;
 }
 
-void getLine(sf::VertexArray& scene,sf::Vector2f p1,sf::Vector2f p2, sf::Color color,float h1, float h2){
+std::vector<sf::Vertex> getLine(sf::Vector2f p1,sf::Vector2f p2, sf::Color color,float h1, float h2){
+    std::vector<sf::Vertex> line;
     if(abs(p1.x - p2.x) > abs(p1.y - p2.y)){
         if(p1.x > p2.x){
             swap(p1,p2);
             swap(h1,h2);
         }
+        line.reserve(int(p2.x-p1.x));
         auto h_values = interpolate(h1,h2,p1.x,p2.x);
         auto values = interpolate(p1.y,p2.y,p1.x,p2.x);
         for(int x = p1.x; x <= p2.x; x++){
-            scene.append(getPixel(x,values[x-p1.x],multiplyColorWithIntensity(color,h_values[x-p1.x])));
+            line.push_back(getPixel(x,values[x-p1.x],multiplyColorWithIntensity(color,h_values[x-p1.x])));
         }
     }
 
@@ -309,15 +284,17 @@ void getLine(sf::VertexArray& scene,sf::Vector2f p1,sf::Vector2f p2, sf::Color c
             swap(p1,p2);
             swap(h1,h2);
         }
+        line.reserve(int(p2.y-p1.y));
         auto h_values = interpolate(h1,h2,p1.y,p2.y);
         auto values = interpolate(p1.x,p2.x,p1.y,p2.y);
         for(int y = p1.y; y <= p2.y; y++){
-            scene.append(getPixel(values[y-p1.y],y,multiplyColorWithIntensity(color,h_values[y-p1.y])));
+            line.push_back(getPixel(values[y-p1.y],y,multiplyColorWithIntensity(color,h_values[y-p1.y])));
         }
     }
+    return line;
 };
 
-void getTriangle(sf::VertexArray& scene, sf::Vector2f l0, sf::Vector2f l1, sf::Vector2f l2, sf::Color color,float h0, float h1, float h2){
+std::vector<std::vector<sf::Vertex>> getTriangle(sf::Vector2f l0, sf::Vector2f l1, sf::Vector2f l2, sf::Color color,float h0, float h1, float h2){
     if(l1.y < l0.y){
         swap(l0,l1);
         swap(h0,h1);
@@ -330,6 +307,8 @@ void getTriangle(sf::VertexArray& scene, sf::Vector2f l0, sf::Vector2f l1, sf::V
         swap(l1,l2);
         swap(h1,h2);
     }
+    std::vector<std::vector<sf::Vertex>> lines;
+    lines.reserve(abs(l2.y - l0.y) + 1);
 
     auto x_02 = interpolate(l0.x,l2.x,l0.y,l2.y);
     auto h_02 = interpolate(h0,h2,l0.y,l2.y);
@@ -347,20 +326,30 @@ void getTriangle(sf::VertexArray& scene, sf::Vector2f l0, sf::Vector2f l1, sf::V
         x_01.push_back(l);
     }
     for(int y = l0.y; y <= l2.y; y++){
-        getLine(scene,sf::Vector2f(x_02[y -l0.y],y),sf::Vector2f(x_01[y - l0.y],y),color,h_02[y-l0.y],h_01[y-l0.y]);
+        lines.push_back(getLine(sf::Vector2f(x_02[y -l0.y],y),sf::Vector2f(x_01[y - l0.y],y),color,h_02[y-l0.y],h_01[y-l0.y]));
     }
+
+    return lines;
 }
 
-void getTriangleWireFrame(sf::VertexArray& scene, Triangle triangle,std::vector<sf::Vector2f>& projected){
-    getLine(scene,projected[triangle.indices[0]],projected[triangle.indices[1]],triangle.color,1,1);
-    getLine(scene,projected[triangle.indices[1]],projected[triangle.indices[2]],triangle.color,1,1);
-    getLine(scene,projected[triangle.indices[2]],projected[triangle.indices[0]],triangle.color,1,1);
+std::vector<std::vector<sf::Vertex>> getTriangleWireFrame(Triangle triangle,std::vector<sf::Vector2f>& projected){
+    std::vector<std::vector<sf::Vertex>> triangle_wireframe;
+    triangle_wireframe.reserve(3);
+    triangle_wireframe.push_back(getLine(projected[triangle.first[0]],projected[triangle.first[1]],triangle.second,1,1));
+    triangle_wireframe.push_back(getLine(projected[triangle.first[1]],projected[triangle.first[2]],triangle.second,1,1));
+    triangle_wireframe.push_back(getLine(projected[triangle.first[2]],projected[triangle.first[0]],triangle.second,1,1));
+
+    return triangle_wireframe;
 }
 
-void getTriangleWireFrame(sf::VertexArray& scene,TempTriangleProjected triangle){
-    getLine(scene,triangle.first[0],triangle.first[1],triangle.second,1,1);
-    getLine(scene,triangle.first[1],triangle.first[2],triangle.second,1,1);
-    getLine(scene,triangle.first[2],triangle.first[0],triangle.second,1,1);
+std::vector<std::vector<sf::Vertex>> getTriangleWireFrame(TempTriangleProjected triangle){
+    std::vector<std::vector<sf::Vertex>> triangle_wireframe;
+    triangle_wireframe.reserve(3);
+    triangle_wireframe.push_back(getLine(triangle.first[0],triangle.first[1],triangle.second,1,1));
+    triangle_wireframe.push_back(getLine(triangle.first[1],triangle.first[2],triangle.second,1,1));
+    triangle_wireframe.push_back(getLine(triangle.first[2],triangle.first[0],triangle.second,1,1));
+    
+    return triangle_wireframe;
 }
 
 std::vector<sf::Vector3f> transformVertices(std::vector<sf::Vector3f>& v, Matrix& transform){
@@ -392,15 +381,15 @@ std::vector<TempTriangle> getTempTriangles(const std::vector<Triangle>& triangle
     for (auto& triangle: triangles){
         TempTriangle temp_triangle;
         for (int i = 0; i < 3; i++){
-            temp_triangle.first[i] = transformed_vertices[triangle.indices[i]];
+            temp_triangle.first[i] = transformed_vertices[triangle.first[i]];
         }
-        temp_triangle.second = triangle.color;
+        temp_triangle.second = triangle.second;
         temp_triangles.push_back(temp_triangle);
     }
     return temp_triangles;
 }
 
-std::vector<TempTriangle> getClippedTriangles(std::vector<TempTriangle> triangles, std::pair<sf::Vector3f,float> plane){
+std::vector<TempTriangle> getClippedTriangles(std::vector<TempTriangle>& triangles, std::pair<sf::Vector3f,float> plane){
     std::vector<TempTriangle> clipped_triangles;
     clipped_triangles.reserve(triangles.size());
     for(auto& triangle: triangles){
@@ -468,8 +457,9 @@ std::vector<TempTriangle> getClippedTriangles(std::vector<TempTriangle> triangle
     return clipped_triangles;
 }
 
-void getObject(sf::VertexArray& scene, const Instance& instance, float viewPort_z, Matrix& transform, ClippingVolume& clipping_volume){
+Object getObject(const Instance& instance, float viewPort_z, Matrix& transform, ClippingVolume& clipping_volume){
     std::vector<sf::Vector2f> projected;
+    Object object;
     Matrix final_transform = transform * getTranslationMatrix(instance.translation)*getRotationMatrix(instance.angles)*getScalingMatrix(instance.scale);
 
     std::vector<TempTriangle> clipped_triangles;
@@ -506,7 +496,7 @@ void getObject(sf::VertexArray& scene, const Instance& instance, float viewPort_
             projected.push_back(projectVector(vertex,viewPort_z));
         }
         for(auto triangle:instance.model_ptr->triangles){
-            getTriangleWireFrame(scene,triangle,projected);
+            object.push_back(getTriangleWireFrame(triangle,projected));
         }
     }
     else if (relative_position == ObjectRelativePositionToPlane::InBetween){
@@ -517,9 +507,11 @@ void getObject(sf::VertexArray& scene, const Instance& instance, float viewPort_
         }
 
         for (auto& triangle: projected_triangles){
-            getTriangleWireFrame(scene,triangle);
+            object.push_back(getTriangleWireFrame(triangle));
         }
     }
+
+    return object;
 }
 
 int main(){
@@ -717,11 +709,19 @@ instances.push_back(
             camera_orientation[2] += 10*dt;
         }
 
-        sf::VertexArray scene (sf::PrimitiveType::Points);
+        sf::VertexArray scene(sf::PrimitiveType::Points);
         for (auto instance: instances){
             Matrix camera_transform = transposeMatrix(getRotationMatrix(camera_orientation)) * getInverseTranslationMatrix(camera_pos);
-            getObject(scene,instance,viewport_pos.z,camera_transform,clipping_volume);
+            Object object = getObject(instance,viewport_pos.z,camera_transform,clipping_volume);
+            for (auto triangle: object){
+                for(auto line:triangle){
+                    for(auto vertex:line){
+                        scene.append(vertex);
+                    }
+                }
+            }
         }
+
         window.draw(scene);
         
         window.display();
