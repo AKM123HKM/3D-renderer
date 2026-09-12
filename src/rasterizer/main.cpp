@@ -6,11 +6,14 @@
 
 constexpr int WIDTH = 800;
 constexpr int HEIGHT = 800;
-constexpr int VIEWPORT_W = 1;
-constexpr int VIEWPORT_H = 1;
+constexpr int VIEWPORT_W = 2;
+constexpr int VIEWPORT_H = 2;
 constexpr float pi = 3.14159;
 using Matrix = std::array<std::array<float, 4>, 4>;
 using Object = std::vector<std::vector<sf::VertexArray>>;
+using TempTriangle = std::pair<std::array<sf::Vector3f,3>,sf::Color>;
+using TempTriangleProjected = std::pair<std::array<sf::Vector2f,3>,sf::Color>;
+using ClippingVolume = std::array<std::pair<sf::Vector3f,float>,5>;
 constexpr Matrix IDENTITY_MATRIX{{
     {1.0f, 0.0f, 0.0f, 0.0f},
     {0.0f, 1.0f, 0.0f, 0.0f},
@@ -25,6 +28,10 @@ struct Vector4f{
     float z;
     float w;
 };
+
+float getDotProduct(sf::Vector3f v1, sf::Vector3f v2){
+    return v1.x * v2.x + v1.y * v2.y + v1.z * v2.z;
+}
 
 Vector4f operator*(const Matrix& mat, const Vector4f& vec) {
     Vector4f result;
@@ -144,15 +151,12 @@ Matrix getScalingMatrix(float scalar){
     return result;
 }
 
-
 struct Triangle{
-    int v1;
-    int v2;
-    int v3;
+    std::array<int,3> indices;
     sf::Color color;
 
-    Triangle():v1(0),v2(1),v3(2),color(sf::Color::Black){}
-    Triangle(int aV1,int aV2,int aV3,sf::Color aColor):v1(aV1),v2(aV2),v3(aV3),color(aColor){}
+    Triangle():indices({0,0,0}),color(sf::Color::Black){}
+    Triangle(std::array<int,3> aIndices,sf::Color aColor):indices(aIndices),color(aColor){}
 };
 
 struct Model{
@@ -165,6 +169,26 @@ struct Instance{
     sf::Vector3f translation;
     std::array<float,3> angles;
     float scale;
+    std::pair<sf::Vector3f,float> bounding_sphere;
+
+    Instance(Model* Amodel_ptr,sf::Vector3f Atranslation, std::array<float,3> Aangles, float Ascale):model_ptr(Amodel_ptr),translation(Atranslation),angles(Aangles),scale(Ascale){
+        sf::Vector3f center;
+        for (auto vertex :model_ptr->vertices){
+            center += vertex;
+        }
+        center *= float(model_ptr->vertices.size());
+
+        float radius;
+        float distance;
+        for (auto vertex: model_ptr->vertices){
+            distance = (center - vertex).length();
+            if(radius < distance){
+                radius = distance;
+            }
+        }
+        bounding_sphere = {center,radius};
+    }
+
 };
 
 sf::Vector3f canvasToViewPort(int x,int y){
@@ -196,11 +220,50 @@ void printVector(sf::Vector2f vector){
     std::cout << "x: " << vector.x << ", y: " << vector.y << std::endl;
 }
 
-sf::Vector2f projectVector(sf::Vector3f vector,float viewport_z){
-    sf::Vector2f viewport_coords = sf::Vector2f((vector.x * viewport_z)/vector.z, (vector.y * viewport_z)/vector.z);
-    sf::Vector2f screen_coords = sf::Vector2f((viewport_coords.x / VIEWPORT_W) * WIDTH, (viewport_coords.y / VIEWPORT_H) * HEIGHT);
+void printVector(sf::Vector3f vector){
+    std::cout << "x: " << vector.x << ", y: " << vector.y << ", z: " << vector.z << std::endl;
+}
+
+sf::Vector2f projectVector(sf::Vector3f vector, float viewport_z){
+
+    sf::Vector2f viewport_coords = {
+        (vector.x * viewport_z) / vector.z,
+        (vector.y * viewport_z) / vector.z
+    };
+
+    sf::Vector2f screen_coords = {
+        (viewport_coords.x / VIEWPORT_W) * WIDTH,
+        (viewport_coords.y / VIEWPORT_H) * HEIGHT
+    };
+
+    if (!std::isfinite(screen_coords.x) ||
+        !std::isfinite(screen_coords.y)) {
+
+        std::cout << "\nBAD PROJECTION\n";
+        std::cout << "3D: "
+                  << vector.x << ", "
+                  << vector.y << ", "
+                  << vector.z << '\n';
+
+        std::cout << "viewport: "
+                  << viewport_coords.x << ", "
+                  << viewport_coords.y << '\n';
+
+        std::cout << "screen: "
+                  << screen_coords.x << ", "
+                  << screen_coords.y << '\n';
+    }
 
     return screen_coords;
+}
+
+TempTriangleProjected projectTriangle(TempTriangle& triangle,float viewport_z){
+    TempTriangleProjected projectedTriangle;
+    for(int i = 0; i < 3; i++){
+        projectedTriangle.first[i] = projectVector(triangle.first[i],viewport_z);
+    }
+    projectedTriangle.second = triangle.second;
+    return projectedTriangle;
 }
 
 sf::Color multiplyColorWithIntensity(sf::Color color,float intensity){
@@ -212,6 +275,8 @@ sf::Color multiplyColorWithIntensity(sf::Color color,float intensity){
 
 std::vector<float> interpolate(float d1, float d2, float i1, float i2){
     std::vector<float> values;
+    // std::cout << "i1: " << i1 << " i2: " << i2
+    //       << " difference: " << i2 - i1 << '\n';
     values.reserve(static_cast<int>(i2 - i1) + 1);
     values.push_back(d1);
     if(i1 == i2){
@@ -226,8 +291,7 @@ std::vector<float> interpolate(float d1, float d2, float i1, float i2){
     return values;
 }
 
-sf::VertexArray getLine(sf::Vector2f p1,sf::Vector2f p2, sf::Color color,float h1, float h2){
-    sf::VertexArray line(sf::PrimitiveType::Points);
+void getLine(sf::VertexArray& scene,sf::Vector2f p1,sf::Vector2f p2, sf::Color color,float h1, float h2){
     if(abs(p1.x - p2.x) > abs(p1.y - p2.y)){
         if(p1.x > p2.x){
             swap(p1,p2);
@@ -236,7 +300,7 @@ sf::VertexArray getLine(sf::Vector2f p1,sf::Vector2f p2, sf::Color color,float h
         auto h_values = interpolate(h1,h2,p1.x,p2.x);
         auto values = interpolate(p1.y,p2.y,p1.x,p2.x);
         for(int x = p1.x; x <= p2.x; x++){
-            line.append(getPixel(x,values[x-p1.x],multiplyColorWithIntensity(color,h_values[x-p1.x])));
+            scene.append(getPixel(x,values[x-p1.x],multiplyColorWithIntensity(color,h_values[x-p1.x])));
         }
     }
 
@@ -248,13 +312,12 @@ sf::VertexArray getLine(sf::Vector2f p1,sf::Vector2f p2, sf::Color color,float h
         auto h_values = interpolate(h1,h2,p1.y,p2.y);
         auto values = interpolate(p1.x,p2.x,p1.y,p2.y);
         for(int y = p1.y; y <= p2.y; y++){
-            line.append(getPixel(values[y-p1.y],y,multiplyColorWithIntensity(color,h_values[y-p1.y])));
+            scene.append(getPixel(values[y-p1.y],y,multiplyColorWithIntensity(color,h_values[y-p1.y])));
         }
     }
-    return line;
 };
 
-std::vector<sf::VertexArray> getTriangle(sf::Vector2f l0, sf::Vector2f l1, sf::Vector2f l2, sf::Color color,float h0, float h1, float h2){
+void getTriangle(sf::VertexArray& scene, sf::Vector2f l0, sf::Vector2f l1, sf::Vector2f l2, sf::Color color,float h0, float h1, float h2){
     if(l1.y < l0.y){
         swap(l0,l1);
         swap(h0,h1);
@@ -267,8 +330,6 @@ std::vector<sf::VertexArray> getTriangle(sf::Vector2f l0, sf::Vector2f l1, sf::V
         swap(l1,l2);
         swap(h1,h2);
     }
-    std::vector<sf::VertexArray> lines;
-    lines.reserve(abs(l2.y - l0.y) + 1);
 
     auto x_02 = interpolate(l0.x,l2.x,l0.y,l2.y);
     auto h_02 = interpolate(h0,h2,l0.y,l2.y);
@@ -286,42 +347,185 @@ std::vector<sf::VertexArray> getTriangle(sf::Vector2f l0, sf::Vector2f l1, sf::V
         x_01.push_back(l);
     }
     for(int y = l0.y; y <= l2.y; y++){
-        lines.push_back(getLine(sf::Vector2f(x_02[y -l0.y],y),sf::Vector2f(x_01[y - l0.y],y),color,h_02[y-l0.y],h_01[y-l0.y]));
+        getLine(scene,sf::Vector2f(x_02[y -l0.y],y),sf::Vector2f(x_01[y - l0.y],y),color,h_02[y-l0.y],h_01[y-l0.y]);
+    }
+}
+
+void getTriangleWireFrame(sf::VertexArray& scene, Triangle triangle,std::vector<sf::Vector2f>& projected){
+    getLine(scene,projected[triangle.indices[0]],projected[triangle.indices[1]],triangle.color,1,1);
+    getLine(scene,projected[triangle.indices[1]],projected[triangle.indices[2]],triangle.color,1,1);
+    getLine(scene,projected[triangle.indices[2]],projected[triangle.indices[0]],triangle.color,1,1);
+}
+
+void getTriangleWireFrame(sf::VertexArray& scene,TempTriangleProjected triangle){
+    getLine(scene,triangle.first[0],triangle.first[1],triangle.second,1,1);
+    getLine(scene,triangle.first[1],triangle.first[2],triangle.second,1,1);
+    getLine(scene,triangle.first[2],triangle.first[0],triangle.second,1,1);
+}
+
+std::vector<sf::Vector3f> transformVertices(std::vector<sf::Vector3f>& v, Matrix& transform){
+    std::vector<sf::Vector3f> transformed_vertices;
+    for(auto vertex: v){
+        transformed_vertices.push_back(get3DVector(transform * get4DVector(vertex)));
     }
 
-    return lines;
+    return transformed_vertices;
 }
 
-std::vector<sf::VertexArray> getTriangleWireFrame(Triangle triangle,std::vector<sf::Vector2f>& projected){
-    std::vector<sf::VertexArray> triangle_wireframe;
-    triangle_wireframe.reserve(3);
-    triangle_wireframe.push_back(getLine(projected[triangle.v1],projected[triangle.v2],triangle.color,1,1));
-    triangle_wireframe.push_back(getLine(projected[triangle.v2],projected[triangle.v3],triangle.color,1,1));
-    triangle_wireframe.push_back(getLine(projected[triangle.v3],projected[triangle.v1],triangle.color,1,1));
-
-    return triangle_wireframe;
+float getSignedDistance(sf::Vector3f point,std::pair<sf::Vector3f,float> plane){
+    return getDotProduct(point,plane.first) + plane.second;
 }
 
-Object getObject(const Instance& instance, float viewPort_z, Matrix& transform){
+sf::Vector3f getIntersection(sf::Vector3f A, sf::Vector3f B, std::pair<sf::Vector3f,float> plane){
+    float t = (-plane.second - getDotProduct(plane.first,A))/getDotProduct(plane.first,B-A);
+    return A + t*(B-A);
+}
+
+enum ObjectRelativePositionToPlane{
+    CompletelyInside,
+    CompletelyOutside,
+    InBetween
+};
+
+std::vector<TempTriangle> getTempTriangles(const std::vector<Triangle>& triangles,const std::vector<sf::Vector3f>& transformed_vertices){
+    std::vector<TempTriangle> temp_triangles;
+    for (auto& triangle: triangles){
+        TempTriangle temp_triangle;
+        for (int i = 0; i < 3; i++){
+            temp_triangle.first[i] = transformed_vertices[triangle.indices[i]];
+        }
+        temp_triangle.second = triangle.color;
+        temp_triangles.push_back(temp_triangle);
+    }
+    return temp_triangles;
+}
+
+std::vector<TempTriangle> getClippedTriangles(std::vector<TempTriangle> triangles, std::pair<sf::Vector3f,float> plane){
+    std::vector<TempTriangle> clipped_triangles;
+    clipped_triangles.reserve(triangles.size());
+    for(auto& triangle: triangles){
+        float signed_distance1 = getSignedDistance(triangle.first[0],plane);
+        float signed_distance2 = getSignedDistance(triangle.first[1],plane);
+        float signed_distance3 = getSignedDistance(triangle.first[2],plane);
+
+        if (signed_distance1 >= 0 && signed_distance2 >= 0 && signed_distance3 >= 0){
+            clipped_triangles.push_back(triangle);
+        }
+        else if (signed_distance1 < 0 && signed_distance2 < 0 && signed_distance3 < 0){
+            continue;
+        }
+        else{
+            std::vector<sf::Vector3f> all_points;
+            all_points.reserve(4);
+            for(int i = 0; i < 3; i++){
+                sf::Vector3f current_vertex = triangle.first[i];
+                sf::Vector3f next_vertex = triangle.first[(i+1)%3];
+
+                float d_current = getSignedDistance(current_vertex,plane);
+                float d_next = getSignedDistance(next_vertex,plane);
+
+                if (d_current >= 0){
+                    all_points.push_back(current_vertex);
+                    if(d_next < 0){
+                        all_points.push_back(getIntersection(current_vertex,next_vertex,plane));
+                    }
+                }
+                else{
+                    if(d_next >= 0){
+                        all_points.push_back(getIntersection(current_vertex,next_vertex,plane));
+                    }
+                }
+            }
+
+            if (all_points.size() == 3){
+                TempTriangle temp_triangle;
+                temp_triangle.first[0] = all_points[0];
+                temp_triangle.first[1] = all_points[1];
+                temp_triangle.first[2] = all_points[2];
+                temp_triangle.second = triangle.second;
+
+                clipped_triangles.push_back(temp_triangle);
+            }
+            else if (all_points.size() == 4){
+                TempTriangle temp_triangle1;
+                temp_triangle1.first[0] = all_points[0];
+                temp_triangle1.first[1] = all_points[1];
+                temp_triangle1.first[2] = all_points[2];
+                temp_triangle1.second = triangle.second;
+                clipped_triangles.push_back(temp_triangle1);
+
+                TempTriangle temp_triangle2;
+                temp_triangle2.first[0] = all_points[0];
+                temp_triangle2.first[1] = all_points[3];
+                temp_triangle2.first[2] = all_points[2];
+                temp_triangle2.second = triangle.second;
+                clipped_triangles.push_back(temp_triangle2);
+
+            }
+        }
+    }
+
+    return clipped_triangles;
+}
+
+void getObject(sf::VertexArray& scene, const Instance& instance, float viewPort_z, Matrix& transform, ClippingVolume& clipping_volume){
     std::vector<sf::Vector2f> projected;
-    Object object;
     Matrix final_transform = transform * getTranslationMatrix(instance.translation)*getRotationMatrix(instance.angles)*getScalingMatrix(instance.scale);
 
-    for(auto vertex:instance.model_ptr->vertices){
-        
-        projected.push_back(projectVector(get3DVector(final_transform*get4DVector(vertex)),viewPort_z));
-    }
-    for(auto triangle:instance.model_ptr->triangles){
-        object.push_back(getTriangleWireFrame(triangle,projected));
+    std::vector<TempTriangle> clipped_triangles;
+    clipped_triangles.reserve(instance.model_ptr->triangles.size());
+    std::vector<sf::Vector3f> transformed_vertices;
+    transformed_vertices.reserve(instance.model_ptr->vertices.size());
+    transformed_vertices = transformVertices(instance.model_ptr->vertices,final_transform);
+
+    ObjectRelativePositionToPlane relative_position = ObjectRelativePositionToPlane::CompletelyInside;
+    for(auto& plane: clipping_volume){
+        if(getSignedDistance(instance.bounding_sphere.first,plane) > instance.bounding_sphere.second){
+            continue;
+        }
+        else if(getSignedDistance(instance.bounding_sphere.first,plane) < -instance.bounding_sphere.second){
+            relative_position = ObjectRelativePositionToPlane::CompletelyOutside;
+            break;
+        }
+        else{
+            relative_position = ObjectRelativePositionToPlane::InBetween;
+            continue;
+            }
     }
 
-    return object;
+    if (relative_position == ObjectRelativePositionToPlane::InBetween){
+        clipped_triangles = getTempTriangles(instance.model_ptr->triangles,transformed_vertices);
+
+        for (auto& plane: clipping_volume){
+            clipped_triangles = getClippedTriangles(clipped_triangles,plane);
+        }
+    }
+
+    if(relative_position == ObjectRelativePositionToPlane::CompletelyInside){
+        for(auto vertex:transformed_vertices){
+            projected.push_back(projectVector(vertex,viewPort_z));
+        }
+        for(auto triangle:instance.model_ptr->triangles){
+            getTriangleWireFrame(scene,triangle,projected);
+        }
+    }
+    else if (relative_position == ObjectRelativePositionToPlane::InBetween){
+        std::vector<TempTriangleProjected> projected_triangles;
+        projected_triangles.reserve(clipped_triangles.size());
+        for(auto& triangle: clipped_triangles){
+            projected_triangles.push_back(projectTriangle(triangle,viewPort_z));
+        }
+
+        for (auto& triangle: projected_triangles){
+            getTriangleWireFrame(scene,triangle);
+        }
+    }
 }
 
-int main() {
+int main(){
     sf::RenderWindow window(sf::VideoMode({WIDTH,HEIGHT}), "Rasterizer");
     sf::Clock clock;
-    const sf::Font font("../assets/PoetsenOne-Regular.ttf");
+    const sf::Font font("assets/PoetsenOne-Regular.ttf");
     sf::Text fps(font);
     sf::Vector3f camera_pos = sf::Vector3f(0,0,0);
     std::array<float,3> camera_orientation {0,0,0};
@@ -329,6 +533,14 @@ int main() {
     fps.setCharacterSize(30);
     fps.setFillColor(sf::Color::Black);
     fps.setPosition(sf::Vector2f(0,0));
+    float one_by_root_2 = 1/std::sqrt(2);
+    ClippingVolume clipping_volume{
+        std::pair{sf::Vector3f(0,0,1),-1},
+        std::pair{sf::Vector3f(one_by_root_2,0,one_by_root_2),0},
+        std::pair{sf::Vector3f(-one_by_root_2,0,one_by_root_2),0},
+        std::pair{sf::Vector3f(0,one_by_root_2,one_by_root_2),0},
+        std::pair{sf::Vector3f(0,-one_by_root_2,one_by_root_2),0},
+    };
 
     Model cube {{
                 { 1,  1,  1},  // 0
@@ -343,66 +555,130 @@ int main() {
             },
 
             {
-                {0, 1, 2, sf::Color::Red},
-                {0, 2, 3, sf::Color::Red},
+                {{0, 1, 2}, sf::Color::Red},
+                {{0, 2, 3}, sf::Color::Red},
 
-                {4, 0, 3, sf::Color::Green},
-                {4, 3, 7, sf::Color::Green},
+                {{4, 0, 3}, sf::Color::Green},
+                {{4, 3, 7}, sf::Color::Green},
 
-                {5, 4, 7, sf::Color::Blue},
-                {5, 7, 6, sf::Color::Blue},
+                {{5, 4, 7}, sf::Color::Blue},
+                {{5, 7, 6}, sf::Color::Blue},
 
-                {1, 5, 6, sf::Color::Yellow},
-                {1, 6, 2, sf::Color::Yellow},
+                {{1, 5, 6}, sf::Color::Yellow},
+                {{1, 6, 2}, sf::Color::Yellow},
 
-                {4, 5, 1, sf::Color::Magenta},
-                {4, 1, 0, sf::Color::Magenta},
+                {{4, 5, 1}, sf::Color::Magenta},
+                {{4, 1, 0}, sf::Color::Magenta},
 
-                {2, 6, 7, sf::Color::Cyan},
-                {2, 7, 3, sf::Color::Cyan}
+                {{2, 6, 7}, sf::Color::Cyan},
+                {{2, 7, 3}, sf::Color::Cyan}
+            }
+        };
+
+    Model triangle{{
+                { 1.5f,  1.0f,  0.5f},  // 0
+                {-1.2f, -0.8f,  0.2f},  // 1
+                { 0.3f, -1.4f, -0.9f}   // 2
+            },
+
+            {
+                {{0, 1, 2}, sf::Color::Red}
             }
         };
 
     std::vector<Instance> instances;
 
-    instances.push_back(
-        Instance{
-            &cube,
-            sf::Vector3f(-3.0f,  2.5f, 10.0f),
-            {20.0f, 30.0f, 10.0f},
-            0.9f
-        }
-    );
+    // instances.push_back(
+    //     Instance{
+    //         &triangle,
+    //         sf::Vector3f(-3,2.5,15),
+    //         {0,0,0},
+    //         0.9f
+    //     }
+    // );
 
-    instances.push_back(
-        Instance{
-            &cube,
-            sf::Vector3f(3.0f,  2.0f, 12.0f),
-            {0.0f, 45.0f, 20.0f},
-            1.1f
-        }
-    );
+// 1. Baseline — fully inside frustum, should look identical to before clipping existed.
+instances.push_back(
+    Instance{
+        &cube,
+        sf::Vector3f(-3.0f, 2.5f, 15.0f),
+        {20.0f, 30.0f, 10.0f},
+        0.9f
+    }
+);
 
-    instances.push_back(
-        Instance{
-            &cube,
-            sf::Vector3f(-3.0f, -2.5f, 14.0f),
-            {30.0f, 10.0f, 45.0f},
-            0.8f
-        }
-    );
+// 2. Straddles the near (z = d) plane — half in front of camera, half behind.
+// Should render as a smaller, clipped shape (fewer/new triangles from the fan split),
+// NOT a flipped ghost cube. This is your main regression test for the "flip" bug.
+instances.push_back(
+    Instance{
+        &cube,
+        sf::Vector3f(0.0f, 0.0f, 1.0f),
+        {15.0f, 15.0f, 0.0f},
+        1.5f
+    }
+);
 
-    instances.push_back(
-        Instance{
-            &cube,
-            sf::Vector3f(3.0f, -2.0f, 16.0f),
-            {45.0f, 20.0f, 0.0f},
-            1.0f
-        }
-    );
+// 3. Fully behind the camera (all z < d, likely negative).
+// Should completely disappear — not appear flipped/mirrored in front.
+instances.push_back(
+    Instance{
+        &cube,
+        sf::Vector3f(4.0f, 3.0f, -5.0f),
+        {0.0f, 0.0f, 0.0f},
+        1.0f
+    }
+);
+
+// 4. Very close and large, straddling near plane AND both side planes at once.
+// Exercises multiple planes clipping the same triangle sequentially —
+// the "second plane clips the already-clipped output" bug would show up here
+// as either missing chunks or edges stretching across the whole screen.
+instances.push_back(
+    Instance{
+        &cube,
+        sf::Vector3f(0.0f, 0.0f, 2.0f),
+        {30.0f, 45.0f, 15.0f},
+        3.0f
+    }
+);
+
+// 5. Straddles the right side plane only, comfortably past the near plane.
+// Isolates side-plane clipping from near-plane clipping.
+instances.push_back(
+    Instance{
+        &cube,
+        sf::Vector3f(8.0f, 0.0f, 10.0f),
+        {0.0f, 20.0f, 0.0f},
+        1.2f
+    }
+);
+
+// 6. Straddles the top plane only.
+instances.push_back(
+    Instance{
+        &cube,
+        sf::Vector3f(0.0f, 6.0f, 10.0f),
+        {10.0f, 0.0f, 0.0f},
+        1.2f
+    }
+);
+
+// 7. Small and distant but off to the side + behind near plane simultaneously —
+// tests a case where the bounding-sphere early-out logic (fully in / fully out /
+// straddling) has to correctly choose "straddling" and not wrongly early-exit.
+instances.push_back(
+    Instance{
+        &cube,
+        sf::Vector3f(-6.0f, -4.0f, 0.5f),
+        {45.0f, 0.0f, 30.0f},
+        0.7f
+    }
+);
 
     while (window.isOpen()) {
-        fps.setString(std::to_string(1/clock.getElapsedTime().asSeconds()));
+        float dt = clock.getElapsedTime().asSeconds();
+        fps.setString(std::to_string(1/dt));
         clock.restart();
         while (const std::optional event = window.pollEvent()) {
             if (event->is<sf::Event::Closed>()) {
@@ -412,15 +688,41 @@ int main() {
         window.clear(sf::Color::White);
         window.draw(fps);
 
+        if(sf::Keyboard::isKeyPressed(sf::Keyboard::Key::Right)){
+            camera_pos.x += 5*dt;
+        }
+        if(sf::Keyboard::isKeyPressed(sf::Keyboard::Key::Left)){
+            camera_pos.x -= 5*dt;
+        }
+        if(sf::Keyboard::isKeyPressed(sf::Keyboard::Key::Up)){
+            camera_pos.y += 5*dt;
+        }
+        if(sf::Keyboard::isKeyPressed(sf::Keyboard::Key::Down)){
+            camera_pos.y -= 5*dt;
+        }
+        if(sf::Keyboard::isKeyPressed(sf::Keyboard::Key::W)){
+            camera_pos.z += 5*dt;
+        }
+        if(sf::Keyboard::isKeyPressed(sf::Keyboard::Key::S)){
+            camera_pos.z -= 5*dt;
+        }
+
+        if(sf::Keyboard::isKeyPressed(sf::Keyboard::Key::F)){
+            camera_orientation[0] += 10*dt;
+        }
+        if(sf::Keyboard::isKeyPressed(sf::Keyboard::Key::G)){
+            camera_orientation[1] += 10*dt;
+        }
+        if(sf::Keyboard::isKeyPressed(sf::Keyboard::Key::H)){
+            camera_orientation[2] += 10*dt;
+        }
+
+        sf::VertexArray scene (sf::PrimitiveType::Points);
         for (auto instance: instances){
             Matrix camera_transform = transposeMatrix(getRotationMatrix(camera_orientation)) * getInverseTranslationMatrix(camera_pos);
-            Object object = getObject(instance,viewport_pos.z,camera_transform);
-            for (auto triangle: object){
-                for(auto line:triangle){
-                    window.draw(line);
-                }
-            }
+            getObject(scene,instance,viewport_pos.z,camera_transform,clipping_volume);
         }
+        window.draw(scene);
         
         window.display();
     }
