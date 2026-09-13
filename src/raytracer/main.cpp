@@ -111,11 +111,11 @@ std::pair<Sphere,float> closestIntersection(sf::Vector3f origin, sf::Vector3f vi
     for (auto sphere:spheres){
         auto [t1,t2] = intersectRaySphere(origin,viewPortCoords,sphere);  
         
-        if(t1 >= t_min & t1 <= t_max & t1 < closest_t){
+        if(t1 >= t_min && t1 <= t_max && t1 < closest_t){
             closest_t = t1;
             closest_sphere = sphere;
         }
-        if(t2 >= t_min & t2 <= t_max & t2 < closest_t){
+        if(t2 >= t_min && t2 <= t_max && t2 < closest_t){
             closest_t = t2;
             closest_sphere = sphere;
         }
@@ -171,7 +171,7 @@ sf::Color traceRay(sf::Vector3f origin,sf::Vector3f ViewPortCoords,float t_min,f
         sf::Color local_color = multiplyColorWithIntensity(closest_sphere.color,computeLighthing(P,normalize(N),origin,closest_sphere.specular,lights,spheres));
         if(closest_sphere.reflectivness){
             sf::Vector3f R = reflect(-1.f*ViewPortCoords,N);
-            if(recursion_depth >= 0 & closest_sphere.reflectivness >= 0){
+            if(recursion_depth >= 0 && closest_sphere.reflectivness >= 0){
                 sf::Color reflected_color = traceRay(ViewPortCoords,R,0.001,INFINITY,spheres,lights,recursion_depth - 1);
                 return addColors(multiplyColorWithIntensity(local_color,(1 - closest_sphere.reflectivness)),multiplyColorWithIntensity(reflected_color,closest_sphere.reflectivness));
             }
@@ -184,7 +184,7 @@ sf::Color traceRay(sf::Vector3f origin,sf::Vector3f ViewPortCoords,float t_min,f
 int main() {
     sf::RenderWindow window(sf::VideoMode({WIDTH,HEIGHT}), "Raytracer");
     sf::Clock clock;
-    const sf::Font font("../assets/PoetsenOne-Regular.ttf");
+    const sf::Font font("assets/PoetsenOne-Regular.ttf");
     sf::Text fps(font);
     fps.setCharacterSize(30);
     fps.setFillColor(sf::Color::White);
