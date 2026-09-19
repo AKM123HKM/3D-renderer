@@ -39,6 +39,11 @@ sf::Vector3f getCrossProduct(sf::Vector3f v1, sf::Vector3f v2){
     return sf::Vector3f(v1.y*v2.z - v2.y*v1.z,-(v1.x*v2.z - v1.z*v2.x),v1.x*v2.y - v2.x*v1.y);
 }
 
+sf::Color operator*(const sf::Color& color, const float intensity){
+    auto scale = [intensity](std::uint8_t channel){return static_cast<std::uint8_t>(std::clamp(channel*intensity,0.0f,225.0f));};
+    return sf::Color(scale(color.r),scale(color.g),scale(color.b));
+}
+
 sf::Vector3f operator*(const Matrix& mat, const sf::Vector3f& vec) {
     Vector4f v (vec.x,vec.y,vec.z,1);
     Vector4f result;
@@ -169,6 +174,65 @@ struct Model{
     std::vector<Triangle> triangles;
 };
 
+// Builds a UV sphere centred at the origin.  The latitude and longitude values
+// control the number of horizontal rings and vertical slices respectively.
+Model createSphereModel(float radius, int latitudeSegments, int longitudeSegments,
+                        sf::Color color) {
+    latitudeSegments = std::max(latitudeSegments, 2);
+    longitudeSegments = std::max(longitudeSegments, 3);
+
+    Model sphere;
+    sphere.vertices.reserve(2 + (latitudeSegments - 1) * longitudeSegments);
+    sphere.triangles.reserve(2 * longitudeSegments * (latitudeSegments - 1));
+
+    const float twoPi = 2.0f * pi;
+    sphere.vertices.push_back({0.0f, radius, 0.0f});       // north pole
+
+    for (int latitude = 1; latitude < latitudeSegments; ++latitude) {
+        const float phi = pi * static_cast<float>(latitude) / latitudeSegments;
+        const float ringRadius = radius * std::sin(phi);
+        const float y = radius * std::cos(phi);
+
+        for (int longitude = 0; longitude < longitudeSegments; ++longitude) {
+            const float theta = twoPi * static_cast<float>(longitude) / longitudeSegments;
+            sphere.vertices.push_back({ringRadius * std::cos(theta), y,
+                                       ringRadius * std::sin(theta)});
+        }
+    }
+
+    const int southPole = static_cast<int>(sphere.vertices.size());
+    sphere.vertices.push_back({0.0f, -radius, 0.0f});      // south pole
+
+    // Top cap.
+    for (int longitude = 0; longitude < longitudeSegments; ++longitude) {
+        const int next = (longitude + 1) % longitudeSegments;
+        sphere.triangles.push_back({{0, 1 + next, 1 + longitude}, color});
+    }
+
+    // Join neighbouring rings.  The winding faces outwards for back-face culling.
+    for (int latitude = 0; latitude < latitudeSegments - 2; ++latitude) {
+        const int upperRing = 1 + latitude * longitudeSegments;
+        const int lowerRing = upperRing + longitudeSegments;
+        for (int longitude = 0; longitude < longitudeSegments; ++longitude) {
+            const int next = (longitude + 1) % longitudeSegments;
+            sphere.triangles.push_back({{upperRing + longitude, upperRing + next,
+                                        lowerRing + next}, color});
+            sphere.triangles.push_back({{upperRing + longitude, lowerRing + next,
+                                        lowerRing + longitude}, color});
+        }
+    }
+
+    // Bottom cap.
+    const int lastRing = southPole - longitudeSegments;
+    for (int longitude = 0; longitude < longitudeSegments; ++longitude) {
+        const int next = (longitude + 1) % longitudeSegments;
+        sphere.triangles.push_back({{southPole, lastRing + longitude,
+                                    lastRing + next}, color});
+    }
+
+    return sphere;
+}
+
 struct Instance{
     Model* model_ptr;
     sf::Vector3f translation;
@@ -195,6 +259,65 @@ struct Instance{
     }
 
 };
+
+float magnitude(sf::Vector3f v){
+    return sqrt(getDotProduct(v,v));
+}
+
+sf::Vector3f normalize(sf::Vector3f v){
+    float mag = magnitude(v);
+    if(!(mag == 0)){
+        return (1/mag) * v;
+    }
+    return sf::Vector3f(-1,-1,-1);
+}
+
+sf::Vector3f reflect(sf::Vector3f v, sf::Vector3f n){
+    return 2.f*normalize(n)*getDotProduct(normalize(n),v) - v;
+}
+
+enum LightType{
+    Ambient,
+    Point,
+    Directional
+};
+
+struct Light{
+    LightType type = Ambient;
+    float intensity = 0;
+    sf::Vector3f dirOrPos = sf::Vector3f(0,0,0);
+
+    Light(LightType Atype,float Aintensity,sf::Vector3f AdirOrPos = sf::Vector3f(0,0,0)):type(Atype),intensity(Aintensity),dirOrPos(AdirOrPos){}
+
+    Light() = default;
+};
+
+void computeLighting(TempTriangle& triangle,std::vector<Light>& lights,Matrix& camera_transform, Matrix& camera_rotation){
+    float i = 0;
+    sf::Vector3f L;
+    const auto& a = triangle.first[0];
+    const auto& b = triangle.first[1];
+    const auto& c = triangle.first[2];
+
+    sf::Vector3f normal = normalize(getCrossProduct(b - a, c - a));
+    sf::Vector3f centre = (a + b + c) / 3.f;
+    for (auto& light: lights){
+        if(light.type == LightType::Ambient){
+            i += light.intensity;
+        }
+        else{
+            if (light.type == LightType::Point){
+                L = normalize(camera_transform * light.dirOrPos - centre);
+            }
+            else if (light.type == LightType::Directional){
+                L = normalize(camera_rotation * light.dirOrPos);
+            }
+            i += light.intensity * std::max(0.0f,getDotProduct(normal,L));
+        }
+    }
+
+    triangle.second = triangle.second*i;
+}
 
 sf::Vector3f canvasToViewPort(int x,int y){
     float Vx = x * (VIEWPORT_W/WIDTH);
@@ -384,6 +507,7 @@ Range drawTriangle(sf::VertexArray& scene,DEPTH_BUFFER& depth_buffer,TempTriangl
 
     // in some cases like l0.y = 10.2 and l2.y = 10.8 y_start and y_end will end up to be 11 and 10 because of 
     // std::ceil and std::floor so we do not draw them.
+
     if (y_end < y_start) {
         return {i_start, i_start - 1};
     }
@@ -403,7 +527,7 @@ Range drawTriangle(sf::VertexArray& scene,DEPTH_BUFFER& depth_buffer,TempTriangl
 
     // setting up the x and z values for both ends of the line hence the start and end prefixes
     float x_start, x_end, z_start, z_end;
-    for(int y = y_start; y < y_end; y++){
+    for(int y = y_start; y <= y_end; y++){
 
         // we take fy to not get any wierd behaviour in case of int and float operations
         float fy = (float)(y);
@@ -438,8 +562,6 @@ Range drawTriangle(sf::VertexArray& scene,DEPTH_BUFFER& depth_buffer,TempTriangl
         // again using std::ceil and std::floor to take out any weird shooting lines from the edges
         int pixel_x_start = std::ceil(x_left);
         int pixel_x_end   = std::floor(x_right);
-        // int pixel_x_start = x_left;
-        // int pixel_x_end = x_right;
 
         // finding the slope of z from x_left to x_right
         float d_zi = (x_right - x_left != 0.0f) ? (z_right - z_left) / (x_right - x_left) : 0.0f;
@@ -447,6 +569,7 @@ Range drawTriangle(sf::VertexArray& scene,DEPTH_BUFFER& depth_buffer,TempTriangl
         // finding z reciprocal for the first step.
         const int half_w = WIDTH / 2;
 
+        // clamping the x values to screen dimensions
         pixel_x_start = std::max(pixel_x_start, -half_w);
         pixel_x_end   = std::min(pixel_x_end, half_w - 1);
 
@@ -564,8 +687,8 @@ int clipTriangle(TempTriangle& triangle, std::pair<sf::Vector3f,float> plane, Te
 
             TempTriangle temp_triangle2;
             temp_triangle2.first[0] = all_points[0];
-            temp_triangle2.first[1] = all_points[3];
-            temp_triangle2.first[2] = all_points[2];
+            temp_triangle2.first[1] = all_points[2];
+            temp_triangle2.first[2] = all_points[3];
             temp_triangle2.second = triangle.second;
             out[1] = temp_triangle2;
 
@@ -663,11 +786,33 @@ int main(){
         {{0, 1, 2}, sf::Color::Red}
     }};
 
+    // A visual marker only; it does not participate in the lighting calculation.
+    const sf::Color lightMarkerColor(255, 230, 0);
+    Model pointLightMarker{cube.vertices, {
+        {{0, 1, 2}, lightMarkerColor}, {{0, 2, 3}, lightMarkerColor},
+        {{4, 0, 3}, lightMarkerColor}, {{4, 3, 7}, lightMarkerColor},
+        {{5, 7, 6}, lightMarkerColor}, {{5, 4, 7}, lightMarkerColor},
+        {{1, 6, 2}, lightMarkerColor}, {{1, 5, 6}, lightMarkerColor},
+        {{1, 4, 5}, lightMarkerColor}, {{1, 0, 4}, lightMarkerColor},
+        {{2, 7, 3}, lightMarkerColor}, {{2, 6, 7}, lightMarkerColor}
+    }};
+
+    // Explicit low-poly sphere, kept alongside createSphereModel() for comparison.
+    const sf::Color sphereBaseColor(80, 170, 255);
+    Model sphere = createSphereModel(1.0f, 12, 16, sf::Color(80, 170, 255));
+    sf::Vector3f pointLightPosition(5.0f, 0.0f, -4.0f);
+    std::vector<Light> lights;
+    lights.emplace_back(Point,0.6,pointLightPosition);
+    lights.emplace_back(Ambient,0.2);
+    lights.emplace_back(Directional,0.4,sf::Vector3f(1,4,4));
+
     std::vector<std::array<Range,3>> wireframe_ranges;
     std::vector<Range> ranges;
     std::vector<Instance> instances;
+    instances.push_back(Instance{&pointLightMarker, pointLightPosition,
+                                 {0.0f, 0.0f, 0.0f}, 0.12f});
     instances.push_back(Instance{&cube, {-3.0f,  2.5f, 15.0f}, {20.0f, 30.0f, 10.0f}, 0.9f});
-    instances.push_back(Instance{&cube, { 0.0f,  0.0f,  1.0f}, {15.0f, 15.0f,  0.0f}, 1.5f});
+    instances.push_back(Instance{&sphere, { 0.0f,  0.0f,  4.0f}, {15.0f, 15.0f,  0.0f}, 1.5f});
     instances.push_back(Instance{&cube, { 4.0f,  3.0f, -5.0f}, { 0.0f,  0.0f,  0.0f}, 1.0f});
     instances.push_back(Instance{&cube, { 0.0f,  0.0f,  2.0f}, {30.0f, 45.0f, 15.0f}, 3.0f});
     instances.push_back(Instance{&cube, { 8.0f,  0.0f, 10.0f}, { 0.0f, 20.0f,  0.0f}, 1.2f});
@@ -707,13 +852,24 @@ int main(){
         if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::G))     camera_orientation[1] += 10 * dt;
         if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::H))     camera_orientation[2] += 10 * dt;
 
+        if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::L)) pointLightPosition.x += 5 * dt;
+        if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::J))  pointLightPosition.x -= 5 * dt;
+        if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::I))    pointLightPosition.y += 5 * dt;
+        if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::K))  pointLightPosition.y -= 5 * dt;
+        if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::O))     pointLightPosition.z += 5 * dt;
+        if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::P))     pointLightPosition.z -= 5 * dt;
+
+        instances[0].translation = pointLightPosition;
+        lights[0].dirOrPos = pointLightPosition;
+
         for(auto& col:depth_buffer){
             for(auto& z: col){
                 z = 0;
             }
         }
-
-        Matrix camera_transform = transposeMatrix(getRotationMatrix(camera_orientation)) * getInverseTranslationMatrix(camera_pos);
+        Matrix camera_translation = getInverseTranslationMatrix(camera_pos);
+        Matrix camera_rotation = transposeMatrix(getRotationMatrix(camera_orientation));
+        Matrix camera_transform = camera_rotation * camera_translation;
         int outside_count = 0;
         for (auto& instance: instances){
             Matrix final_transform = camera_transform * getTranslationMatrix(instance.translation)*getRotationMatrix(instance.angles)*getScalingMatrix(instance.scale);
@@ -757,6 +913,7 @@ int main(){
                 // }
 
                 for (auto& triangle: triangle_buff1){
+                    computeLighting(triangle,lights,camera_transform,camera_rotation);
                     ranges.push_back(drawTriangle(scene,depth_buffer,triangle,1,1,1,viewport_pos.z));
                 }
 
@@ -779,6 +936,7 @@ int main(){
                 // }
 
                 for (auto& triangle: triangle_buff1){
+                    computeLighting(triangle,lights,camera_transform,camera_rotation);
                     ranges.push_back(drawTriangle(scene,depth_buffer,triangle,1,1,1,viewport_pos.z));
                 }
             }
