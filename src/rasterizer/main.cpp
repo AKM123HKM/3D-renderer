@@ -13,8 +13,6 @@ constexpr float pi = 3.14159;
 using Matrix = std::array<std::array<float, 4>, 4>;
 using Object = std::vector<std::vector<std::vector<sf::Vertex>>>;
 using Range = std::array<int,2>;
-using Triangle = std::pair<std::array<int,3>,sf::Color>;
-using TempTriangle = std::pair<std::array<sf::Vector3f,3>,sf::Color>;
 using TempTriangleProjected = std::pair<std::array<sf::Vector2f,3>,sf::Color>;
 using ClippingVolume = std::array<std::pair<sf::Vector3f,float>,5>;
 constexpr Matrix IDENTITY_MATRIX{{
@@ -40,7 +38,7 @@ sf::Vector3f getCrossProduct(sf::Vector3f v1, sf::Vector3f v2){
 }
 
 sf::Color operator*(const sf::Color& color, const float intensity){
-    auto scale = [intensity](std::uint8_t channel){return static_cast<std::uint8_t>(std::clamp(channel*intensity,0.0f,225.0f));};
+    auto scale = [intensity](std::uint8_t channel){return static_cast<std::uint8_t>(std::clamp(channel*intensity,0.0f,255.0f));};
     return sf::Color(scale(color.r),scale(color.g),scale(color.b));
 }
 
@@ -169,11 +167,25 @@ Matrix getScalingMatrix(float scalar){
     return result;
 }
 
+struct Triangle{
+    std::array<int,3> indices;
+    sf::Color color;
+    std::array<sf::Vector3f,3> normals{sf::Vector3f(0,0,0),sf::Vector3f(0,0,0),sf::Vector3f(0,0,0)};
+};
+
+struct TempTriangle{
+    std::array<sf::Vector3f,3> vertices;
+    sf::Color color;
+    std::array<sf::Vector3f,3> normals{sf::Vector3f(0,0,0),sf::Vector3f(0,0,0),sf::Vector3f(0,0,0)};
+};
+
 struct Model{
     std::vector<sf::Vector3f> vertices;
     std::vector<Triangle> triangles;
 };
 
+
+// MADE BY AI (I DIDN'T BOTHERED HAVING A HUGE SPHERE MESH IN THE CODE)
 // Builds a UV sphere centred at the origin.  The latitude and longitude values
 // control the number of horizontal rings and vertical slices respectively.
 Model createSphereModel(float radius, int latitudeSegments, int longitudeSegments,
@@ -182,31 +194,45 @@ Model createSphereModel(float radius, int latitudeSegments, int longitudeSegment
     longitudeSegments = std::max(longitudeSegments, 3);
 
     Model sphere;
-    sphere.vertices.reserve(2 + (latitudeSegments - 1) * longitudeSegments);
+    std::vector<sf::Vector3f> vertexNormals;  // parallel to sphere.vertices
+    const size_t vertexCount = 2 + (latitudeSegments - 1) * longitudeSegments;
+    sphere.vertices.reserve(vertexCount);
+    vertexNormals.reserve(vertexCount);
     sphere.triangles.reserve(2 * longitudeSegments * (latitudeSegments - 1));
 
     const float twoPi = 2.0f * pi;
     sphere.vertices.push_back({0.0f, radius, 0.0f});       // north pole
+    vertexNormals.push_back({0.0f, 1.0f, 0.0f});
 
     for (int latitude = 1; latitude < latitudeSegments; ++latitude) {
         const float phi = pi * static_cast<float>(latitude) / latitudeSegments;
-        const float ringRadius = radius * std::sin(phi);
-        const float y = radius * std::cos(phi);
+        const float sinPhi = std::sin(phi);
+        const float cosPhi = std::cos(phi);
+        const float ringRadius = radius * sinPhi;
+        const float y = radius * cosPhi;
 
         for (int longitude = 0; longitude < longitudeSegments; ++longitude) {
             const float theta = twoPi * static_cast<float>(longitude) / longitudeSegments;
-            sphere.vertices.push_back({ringRadius * std::cos(theta), y,
-                                       ringRadius * std::sin(theta)});
+            const float cosTheta = std::cos(theta);
+            const float sinTheta = std::sin(theta);
+            sphere.vertices.push_back({ringRadius * cosTheta, y, ringRadius * sinTheta});
+            vertexNormals.push_back({sinPhi * cosTheta, cosPhi, sinPhi * sinTheta});
         }
     }
 
     const int southPole = static_cast<int>(sphere.vertices.size());
     sphere.vertices.push_back({0.0f, -radius, 0.0f});      // south pole
+    vertexNormals.push_back({0.0f, -1.0f, 0.0f});
+
+    auto addTriangle = [&](int a, int b, int c) {
+        sphere.triangles.push_back({{a, b, c}, color,
+                                    {vertexNormals[a], vertexNormals[b], vertexNormals[c]}});
+    };
 
     // Top cap.
     for (int longitude = 0; longitude < longitudeSegments; ++longitude) {
         const int next = (longitude + 1) % longitudeSegments;
-        sphere.triangles.push_back({{0, 1 + next, 1 + longitude}, color});
+        addTriangle(0, 1 + next, 1 + longitude);
     }
 
     // Join neighbouring rings.  The winding faces outwards for back-face culling.
@@ -215,10 +241,8 @@ Model createSphereModel(float radius, int latitudeSegments, int longitudeSegment
         const int lowerRing = upperRing + longitudeSegments;
         for (int longitude = 0; longitude < longitudeSegments; ++longitude) {
             const int next = (longitude + 1) % longitudeSegments;
-            sphere.triangles.push_back({{upperRing + longitude, upperRing + next,
-                                        lowerRing + next}, color});
-            sphere.triangles.push_back({{upperRing + longitude, lowerRing + next,
-                                        lowerRing + longitude}, color});
+            addTriangle(upperRing + longitude, upperRing + next, lowerRing + next);
+            addTriangle(upperRing + longitude, lowerRing + next, lowerRing + longitude);
         }
     }
 
@@ -226,8 +250,7 @@ Model createSphereModel(float radius, int latitudeSegments, int longitudeSegment
     const int lastRing = southPole - longitudeSegments;
     for (int longitude = 0; longitude < longitudeSegments; ++longitude) {
         const int next = (longitude + 1) % longitudeSegments;
-        sphere.triangles.push_back({{southPole, lastRing + longitude,
-                                    lastRing + next}, color});
+        addTriangle(southPole, lastRing + longitude, lastRing + next);
     }
 
     return sphere;
@@ -292,31 +315,28 @@ struct Light{
     Light() = default;
 };
 
-void computeLighting(TempTriangle& triangle,std::vector<Light>& lights,Matrix& camera_transform, Matrix& camera_rotation){
-    float i = 0;
+std::array<float,3> computeLighting(TempTriangle& triangle,std::vector<Light>& lights,Matrix& camera_transform, Matrix& camera_rotation){
     sf::Vector3f L;
-    const auto& a = triangle.first[0];
-    const auto& b = triangle.first[1];
-    const auto& c = triangle.first[2];
 
-    sf::Vector3f normal = normalize(getCrossProduct(b - a, c - a));
-    sf::Vector3f centre = (a + b + c) / 3.f;
-    for (auto& light: lights){
-        if(light.type == LightType::Ambient){
-            i += light.intensity;
-        }
-        else{
-            if (light.type == LightType::Point){
-                L = normalize(camera_transform * light.dirOrPos - centre);
+    std::array<float,3> intensities{0.0f,0.0f,0.0f};
+    for(int j = 0; j < 3; j++){
+        for (auto& light: lights){
+            if(light.type == LightType::Ambient){
+                intensities[j] += light.intensity;
             }
-            else if (light.type == LightType::Directional){
-                L = normalize(camera_rotation * light.dirOrPos);
+            else{
+                if (light.type == LightType::Point){
+                    L = normalize(camera_transform * light.dirOrPos - triangle.vertices[j]);
+                }
+                else if (light.type == LightType::Directional){
+                    L = normalize(camera_rotation * light.dirOrPos);
+                }
+                intensities[j] += light.intensity * std::max(0.0f,getDotProduct(triangle.normals[j],L));
             }
-            i += light.intensity * std::max(0.0f,getDotProduct(normal,L));
         }
     }
 
-    triangle.second = triangle.second*i;
+    return intensities;
 }
 
 sf::Vector3f canvasToViewPort(int x,int y){
@@ -378,17 +398,10 @@ sf::Vector2f projectVector(sf::Vector3f vector, float viewport_z){
 TempTriangleProjected projectTriangle(TempTriangle& triangle,float viewport_z){
     TempTriangleProjected projectedTriangle;
     for(int i = 0; i < 3; i++){
-        projectedTriangle.first[i] = projectVector(triangle.first[i],viewport_z);
+        projectedTriangle.first[i] = projectVector(triangle.vertices[i],viewport_z);
     }
-    projectedTriangle.second = triangle.second;
+    projectedTriangle.second = triangle.color;
     return projectedTriangle;
-}
-
-sf::Color multiplyColorWithIntensity(sf::Color color,float intensity){
-    int r = std::min(static_cast<int>(color.r) * intensity,255.f);
-    int g = std::min(static_cast<int>(color.g) * intensity,255.f);
-    int b = std::min(static_cast<int>(color.b) * intensity,255.f);
-    return sf::Color(r,g,b);
 }
 
 std::vector<float> interpolate(float d1, float d2, float i1, float i2){
@@ -432,7 +445,7 @@ Range drawLine(sf::VertexArray& scene,DEPTH_BUFFER& depth_buffer,sf::Vector2f p1
         auto z_values = interpolate(z1,z2,p1.x,p2.x);
         for(int x = p1.x; x <= p2.x; x++){
             float z = z_values[x - p1.x];
-            vertex = getPixel(x,values[x-p1.x],multiplyColorWithIntensity(color,h_values[x-p1.x]),depth_buffer,z);
+            vertex = getPixel(x,values[x-p1.x],color*h_values[x-p1.x],depth_buffer,z);
             if(!(vertex.color == sf::Color::Transparent)){
                 scene.append(vertex);
             }
@@ -451,7 +464,7 @@ Range drawLine(sf::VertexArray& scene,DEPTH_BUFFER& depth_buffer,sf::Vector2f p1
         auto z_values = interpolate(z1,z2,p1.y,p2.y);
         for(int y = p1.y; y <= p2.y; y++){
             float z = z_values[y - p1.y];
-            vertex = getPixel(values[y-p1.y],y,multiplyColorWithIntensity(color,h_values[y-p1.y]),depth_buffer,z);
+            vertex = getPixel(values[y-p1.y],y,color*h_values[y-p1.y],depth_buffer,z);
             if(!(vertex.color == sf::Color::Transparent)){
                 scene.append(vertex);
             }
@@ -463,13 +476,13 @@ Range drawLine(sf::VertexArray& scene,DEPTH_BUFFER& depth_buffer,sf::Vector2f p1
 
 Range drawTriangle(sf::VertexArray& scene,DEPTH_BUFFER& depth_buffer,TempTriangle& triangle,float h0, float h1, float h2,float viewport_z){
     // Project the vertices and get the z values stored in a separate variable for ease.
-    sf::Vector2f l0 = projectVector(triangle.first[0],viewport_z);
-    float z0 = triangle.first[0].z;
-    sf::Vector2f l1 = projectVector(triangle.first[1],viewport_z);
-    float z1 = triangle.first[1].z;
-    sf::Vector2f l2 = projectVector(triangle.first[2],viewport_z);
-    float z2 = triangle.first[2].z;
-    sf::Color color = triangle.second;
+    sf::Vector2f l0 = projectVector(triangle.vertices[0],viewport_z);
+    float z0 = triangle.vertices[0].z;
+    sf::Vector2f l1 = projectVector(triangle.vertices[1],viewport_z);
+    float z1 = triangle.vertices[1].z;
+    sf::Vector2f l2 = projectVector(triangle.vertices[2],viewport_z);
+    float z2 = triangle.vertices[2].z;
+    sf::Color color = triangle.color;
 
     // starting the counter for range
     int i_start = scene.getVertexCount() - 1;
@@ -520,13 +533,16 @@ Range drawTriangle(sf::VertexArray& scene,DEPTH_BUFFER& depth_buffer,TempTriangl
     // precalculating slope for every edge of the triangle along with slope for z reciporocal values too
     float dx_02  = (dy_02 != 0.0f) ? (l2.x - l0.x) / dy_02 : 0.0f;
     float diz_02 = (dy_02 != 0.0f) ? (iz2  - iz0 ) / dy_02 : 0.0f;
+    float dh_02 = (dy_02 != 0.0f) ? (h2 - h0) / dy_02 : 0.0f;
     float dx_01  = (dy_01 != 0.0f) ? (l1.x - l0.x) / dy_01 : 0.0f;
     float diz_01 = (dy_01 != 0.0f) ? (iz1  - iz0 ) / dy_01 : 0.0f;
+    float dh_01 = (dy_02 != 0.0f) ? (h1 - h0) / dy_01 : 0.0f;
     float dx_12  = (dy_12 != 0.0f) ? (l2.x - l1.x) / dy_12 : 0.0f;
     float diz_12 = (dy_12 != 0.0f) ? (iz2  - iz1 ) / dy_12 : 0.0f;
+    float dh_12 = (dy_02 != 0.0f) ? (h2 - h1) / dy_12 : 0.0f;
 
     // setting up the x and z values for both ends of the line hence the start and end prefixes
-    float x_start, x_end, z_start, z_end;
+    float x_start, x_end, z_start, z_end, h_start, h_end;
     for(int y = y_start; y <= y_end; y++){
 
         // we take fy to not get any wierd behaviour in case of int and float operations
@@ -536,27 +552,31 @@ Range drawTriangle(sf::VertexArray& scene,DEPTH_BUFFER& depth_buffer,TempTriangl
         float d02 = fy - l0.y;
         x_start = l0.x +  d02 * dx_02;
         z_start = iz0 + d02  * diz_02;
+        h_start = h0 + d02 * dh_02;
         
         // since we have two edges for x_end we take two cases and calculate x_end
         if(fy >= l1.y){
             float d12 = fy - l1.y;
             x_end = l1.x + d12 * dx_12;
             z_end = iz1 + d12 * diz_12;
+            h_end = h1 + d12 * dh_12;
         }
         else{
             x_end = l0.x + d02 * dx_01;
             z_end = iz0 + d02 * diz_01;
+            h_end = h0 + d02 * dh_01;
         }
 
         // we don't know which side is left or right since our for loop will need that, we create temporary
         // variable and swap them if needed and use those in the for loop
-        float x_left = x_start, z_left = z_start;
-        float x_right = x_end, z_right = z_end;
+        float x_left = x_start, z_left = z_start, h_left = h_start;
+        float x_right = x_end, z_right = z_end, h_right = h_end;
 
         // swap the variables to follow our for loop
         if(x_end < x_start){
             swap(x_left,x_right);
             swap(z_left,z_right);
+            swap(h_left,h_right);
         }
 
         // again using std::ceil and std::floor to take out any weird shooting lines from the edges
@@ -564,7 +584,9 @@ Range drawTriangle(sf::VertexArray& scene,DEPTH_BUFFER& depth_buffer,TempTriangl
         int pixel_x_end   = std::floor(x_right);
 
         // finding the slope of z from x_left to x_right
-        float d_zi = (x_right - x_left != 0.0f) ? (z_right - z_left) / (x_right - x_left) : 0.0f;
+        float d_x = x_right - x_left;
+        float d_zi = (d_x != 0.0f) ? (z_right - z_left) / (d_x) : 0.0f;
+        float d_h = (d_x != 0.0f) ? (h_right - h_left) / (d_x) : 0.0f;
         
         // finding z reciprocal for the first step.
         const int half_w = WIDTH / 2;
@@ -578,9 +600,10 @@ Range drawTriangle(sf::VertexArray& scene,DEPTH_BUFFER& depth_buffer,TempTriangl
         }
 
         float iz = z_left + (pixel_x_start - x_left) * d_zi;
+        float h = h_left + (pixel_x_start - x_left) * d_h;
 
-        for (int x = pixel_x_start; x <= pixel_x_end; ++x, iz += d_zi) {
-            sf::Vertex vertex = getPixel(x,y,color,depth_buffer,iz);
+        for (int x = pixel_x_start; x <= pixel_x_end; ++x, iz += d_zi, h += d_h) {
+            sf::Vertex vertex = getPixel(x,y,color*h,depth_buffer,iz);
             if(!(vertex.color == sf::Color::Transparent)){
                 scene.append(vertex);
             }
@@ -617,21 +640,24 @@ enum ObjectRelativePositionToPlane{
     InBetween
 };
 
-TempTriangle getTempTriangle(Triangle& triangle, std::vector<sf::Vector3f>& transformed_vertices){
+TempTriangle getTempTriangle(Triangle& triangle, std::vector<sf::Vector3f>& transformed_vertices,Matrix& rotation_matrix){
     TempTriangle temp_triangle;
-    temp_triangle.first[0] = transformed_vertices[triangle.first[0]];
-    temp_triangle.first[1] = transformed_vertices[triangle.first[1]];
-    temp_triangle.first[2] = transformed_vertices[triangle.first[2]];
-    temp_triangle.second = triangle.second;
+    temp_triangle.vertices[0] = transformed_vertices[triangle.indices[0]];
+    temp_triangle.vertices[1] = transformed_vertices[triangle.indices[1]];
+    temp_triangle.vertices[2] = transformed_vertices[triangle.indices[2]];
+    temp_triangle.color = triangle.color;
+    for(int i = 0; i < 3; i++){
+        temp_triangle.normals[i] = rotation_matrix * triangle.normals[i];
+    }
 
     return temp_triangle;
 }
 
 int clipTriangle(TempTriangle& triangle, std::pair<sf::Vector3f,float> plane, TempTriangle out[2]){
 
-    float signed_distance1 = getSignedDistance(triangle.first[0],plane);
-    float signed_distance2 = getSignedDistance(triangle.first[1],plane);
-    float signed_distance3 = getSignedDistance(triangle.first[2],plane);
+    float signed_distance1 = getSignedDistance(triangle.vertices[0],plane);
+    float signed_distance2 = getSignedDistance(triangle.vertices[1],plane);
+    float signed_distance3 = getSignedDistance(triangle.vertices[2],plane);
     int number_of_triangles = 0;
 
     if (signed_distance1 >= 0 && signed_distance2 >= 0 && signed_distance3 >= 0){
@@ -645,8 +671,8 @@ int clipTriangle(TempTriangle& triangle, std::pair<sf::Vector3f,float> plane, Te
         std::array<sf::Vector3f,4> all_points;
         int j = 0;
         for(int i = 0; i < 3; i++){
-            sf::Vector3f current_vertex = triangle.first[i];
-            sf::Vector3f next_vertex = triangle.first[(i+1)%3];
+            sf::Vector3f current_vertex = triangle.vertices[i];
+            sf::Vector3f next_vertex = triangle.vertices[(i+1)%3];
 
             float d_current = getSignedDistance(current_vertex,plane);
             float d_next = getSignedDistance(next_vertex,plane);
@@ -669,27 +695,30 @@ int clipTriangle(TempTriangle& triangle, std::pair<sf::Vector3f,float> plane, Te
 
         if (j == 3){
             TempTriangle temp_triangle;
-            temp_triangle.first[0] = all_points[0];
-            temp_triangle.first[1] = all_points[1];
-            temp_triangle.first[2] = all_points[2];
-            temp_triangle.second = triangle.second;
+            temp_triangle.vertices[0] = all_points[0];
+            temp_triangle.vertices[1] = all_points[1];
+            temp_triangle.vertices[2] = all_points[2];
+            temp_triangle.color = triangle.color;
+            temp_triangle.normals = triangle.normals;
 
             out[0] = temp_triangle;
             number_of_triangles = 1;
         }
         else if (j == 4){
             TempTriangle temp_triangle1;
-            temp_triangle1.first[0] = all_points[0];
-            temp_triangle1.first[1] = all_points[1];
-            temp_triangle1.first[2] = all_points[2];
-            temp_triangle1.second = triangle.second;
+            temp_triangle1.vertices[0] = all_points[0];
+            temp_triangle1.vertices[1] = all_points[1];
+            temp_triangle1.vertices[2] = all_points[2];
+            temp_triangle1.color = triangle.color;
+            temp_triangle1.normals = triangle.normals;
             out[0] = temp_triangle1;
 
             TempTriangle temp_triangle2;
-            temp_triangle2.first[0] = all_points[0];
-            temp_triangle2.first[1] = all_points[2];
-            temp_triangle2.first[2] = all_points[3];
-            temp_triangle2.second = triangle.second;
+            temp_triangle2.vertices[0] = all_points[0];
+            temp_triangle2.vertices[1] = all_points[2];
+            temp_triangle2.vertices[2] = all_points[3];
+            temp_triangle2.color = triangle.color;
+            temp_triangle2.normals = triangle.normals;
             out[1] = temp_triangle2;
 
             number_of_triangles = 2;
@@ -700,9 +729,9 @@ int clipTriangle(TempTriangle& triangle, std::pair<sf::Vector3f,float> plane, Te
 }
 
 bool isTriangleVisible(const TempTriangle& triangle){
-    const auto& a = triangle.first[0];
-    const auto& b = triangle.first[1];
-    const auto& c = triangle.first[2];
+    const auto& a = triangle.vertices[0];
+    const auto& b = triangle.vertices[1];
+    const auto& c = triangle.vertices[2];
 
     sf::Vector3f normal = getCrossProduct(b - a, c - a);
     sf::Vector3f centre = (a + b + c) / 3.f;
@@ -738,45 +767,52 @@ int main(){
         std::pair{sf::Vector3f(0,-one_by_root_2,one_by_root_2),0},
     };
 
+    const sf::Vector3f posX { 1,  0,  0};
+    const sf::Vector3f negX {-1,  0,  0};
+    const sf::Vector3f posY { 0,  1,  0};
+    const sf::Vector3f negY { 0, -1,  0};
+    const sf::Vector3f posZ { 0,  0,  1};
+    const sf::Vector3f negZ { 0,  0, -1};
+
     Model cube {{
-        // Front face (z = +1), CCW from outside (+z looking toward -z)
-        { 1,  1,  1},  // 0  top-right-front
-        {-1,  1,  1},  // 1  top-left-front
-        {-1, -1,  1},  // 2  bottom-left-front
-        { 1, -1,  1},  // 3  bottom-right-front
+            // Front face (z = +1), CCW from outside (+z looking toward -z)
+            { 1,  1,  1},  // 0  top-right-front
+            {-1,  1,  1},  // 1  top-left-front
+            {-1, -1,  1},  // 2  bottom-left-front
+            { 1, -1,  1},  // 3  bottom-right-front
 
-        // Back face (z = -1)
-        { 1,  1, -1},  // 4  top-right-back
-        {-1,  1, -1},  // 5  top-left-back
-        {-1, -1, -1},  // 6  bottom-left-back
-        { 1, -1, -1}   // 7  bottom-right-back
-    },
-    {
-        // +Z
-        {{0, 1, 2}, sf::Color::Red},
-        {{0, 2, 3}, sf::Color::Red},
+            // Back face (z = -1)
+            { 1,  1, -1},  // 4  top-right-back
+            {-1,  1, -1},  // 5  top-left-back
+            {-1, -1, -1},  // 6  bottom-left-back
+            { 1, -1, -1}   // 7  bottom-right-back
+        },
+        {
+            // +Z
+            {{0, 1, 2}, sf::Color::Red,     {posZ, posZ, posZ}},
+            {{0, 2, 3}, sf::Color::Red,     {posZ, posZ, posZ}},
 
-        // +X
-        {{4, 0, 3}, sf::Color::Green},
-        {{4, 3, 7}, sf::Color::Green},
+            // +X
+            {{4, 0, 3}, sf::Color::Green,   {posX, posX, posX}},
+            {{4, 3, 7}, sf::Color::Green,   {posX, posX, posX}},
 
-        // -Z
-        {{5, 7, 6}, sf::Color::Blue},
-        {{5, 4, 7}, sf::Color::Blue},
+            // -Z
+            {{5, 7, 6}, sf::Color::Blue,    {negZ, negZ, negZ}},
+            {{5, 4, 7}, sf::Color::Blue,    {negZ, negZ, negZ}},
 
-        // -X
-        {{1, 6, 2}, sf::Color::Yellow},
-        {{1, 5, 6}, sf::Color::Yellow},
+            // -X
+            {{1, 6, 2}, sf::Color::Yellow,  {negX, negX, negX}},
+            {{1, 5, 6}, sf::Color::Yellow,  {negX, negX, negX}},
 
-        // +Y
-        {{1, 4, 5}, sf::Color::Magenta},
-        {{1, 0, 4}, sf::Color::Magenta},
+            // +Y
+            {{1, 4, 5}, sf::Color::Magenta, {posY, posY, posY}},
+            {{1, 0, 4}, sf::Color::Magenta, {posY, posY, posY}},
 
-        // -Y
-        {{2, 7, 3}, sf::Color::Cyan},
-        {{2, 6, 7}, sf::Color::Cyan}
-    }};
-
+            // -Y
+            {{2, 7, 3}, sf::Color::Cyan,    {negY, negY, negY}},
+            {{2, 6, 7}, sf::Color::Cyan,    {negY, negY, negY}}
+        }
+    };
     Model triangle{{
         { 1.5f,  1.0f,  0.5f},  // 0
         {-1.2f, -0.8f,  0.2f},  // 1
@@ -872,7 +908,8 @@ int main(){
         Matrix camera_transform = camera_rotation * camera_translation;
         int outside_count = 0;
         for (auto& instance: instances){
-            Matrix final_transform = camera_transform * getTranslationMatrix(instance.translation)*getRotationMatrix(instance.angles)*getScalingMatrix(instance.scale);
+            Matrix rotation = getRotationMatrix(instance.angles);
+            Matrix final_transform = camera_transform * getTranslationMatrix(instance.translation)*rotation*getScalingMatrix(instance.scale);
 
             ObjectRelativePositionToPlane relative_position = ObjectRelativePositionToPlane::CompletelyInside;
             
@@ -894,13 +931,13 @@ int main(){
             }
 
             if(relative_position != ObjectRelativePositionToPlane::CompletelyOutside){
-                for(auto vertex: instance.model_ptr->vertices){
+                for(auto& vertex: instance.model_ptr->vertices){
                     vertices_buff.push_back(final_transform*vertex);
                 }
 
                 triangle_buff1.clear();
                 for(auto& triangle:instance.model_ptr->triangles){
-                    TempTriangle temp_triangle = getTempTriangle(triangle,vertices_buff);
+                    TempTriangle temp_triangle = getTempTriangle(triangle,vertices_buff,rotation);
                     if(isTriangleVisible(temp_triangle)){
                         triangle_buff1.push_back(temp_triangle);
                     }
@@ -913,8 +950,8 @@ int main(){
                 // }
 
                 for (auto& triangle: triangle_buff1){
-                    computeLighting(triangle,lights,camera_transform,camera_rotation);
-                    ranges.push_back(drawTriangle(scene,depth_buffer,triangle,1,1,1,viewport_pos.z));
+                    auto intensitites = computeLighting(triangle,lights,camera_transform,camera_rotation);
+                    ranges.push_back(drawTriangle(scene,depth_buffer,triangle,intensitites[0],intensitites[1],intensitites[2],viewport_pos.z));
                 }
 
             }
@@ -936,8 +973,8 @@ int main(){
                 // }
 
                 for (auto& triangle: triangle_buff1){
-                    computeLighting(triangle,lights,camera_transform,camera_rotation);
-                    ranges.push_back(drawTriangle(scene,depth_buffer,triangle,1,1,1,viewport_pos.z));
+                    auto intensitites = computeLighting(triangle,lights,camera_transform,camera_rotation);
+                    ranges.push_back(drawTriangle(scene,depth_buffer,triangle,intensitites[0],intensitites[1],intensitites[2],viewport_pos.z));
                 }
             }
 
