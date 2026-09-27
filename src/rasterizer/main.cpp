@@ -98,6 +98,14 @@ Matrix operator*(const Matrix& mat, float scalar){
     return result;
 }
 
+sf::Vector3f transformDirection(const Matrix& m, const sf::Vector3f& v) {
+    return {
+        m[0][0]*v.x + m[0][1]*v.y + m[0][2]*v.z,
+        m[1][0]*v.x + m[1][1]*v.y + m[1][2]*v.z,
+        m[2][0]*v.x + m[2][1]*v.y + m[2][2]*v.z
+    };
+}
+
 Matrix transposeMatrix(const Matrix& mat){
     Matrix transposedMatrix = IDENTITY_MATRIX;
     for (int col = 0; col < 4; col++){
@@ -262,8 +270,9 @@ struct Instance{
     std::array<float,3> angles;
     float scale;
     std::pair<sf::Vector3f,float> bounding_sphere;
+    float specular;
 
-    Instance(Model* Amodel_ptr,sf::Vector3f Atranslation, std::array<float,3> Aangles, float Ascale):model_ptr(Amodel_ptr),translation(Atranslation),angles(Aangles),scale(Ascale){
+    Instance(Model* Amodel_ptr,sf::Vector3f Atranslation, std::array<float,3> Aangles, float Ascale, float Aspecular = -1.f):model_ptr(Amodel_ptr),translation(Atranslation),angles(Aangles),scale(Ascale),specular(Aspecular){
         sf::Vector3f center;
         for (auto vertex :model_ptr->vertices){
             center += vertex;
@@ -315,7 +324,43 @@ struct Light{
     Light() = default;
 };
 
-std::array<float,3> computeLighting(TempTriangle& triangle,std::vector<Light>& lights,Matrix& camera_transform, Matrix& camera_rotation){
+sf::Color computeLightingPerVertex(sf::Vector3f non_projected_vertex_pos,sf::Vector3f normal,sf::Color color,std::vector<Light>& lights, float specular, Matrix& camera_translation, Matrix& camera_rotation){
+    sf::Vector3f L;
+    float i = 0;
+    for (auto& light: lights){
+            if(light.type == LightType::Ambient){
+                i += light.intensity;
+            }
+            else{
+                if (light.type == LightType::Point){
+                    L = normalize(camera_rotation*camera_translation * light.dirOrPos - non_projected_vertex_pos);
+                }
+                else if (light.type == LightType::Directional){
+                    L = normalize(transformDirection(camera_rotation,light.dirOrPos));
+                }
+
+                float NdotL = getDotProduct(L, normal);
+                i += light.intensity * std::max(0.0f, NdotL);
+
+                if (specular > 0.0f && NdotL > 0.0f) {
+                    sf::Vector3f R = reflect(L, normal);
+                    sf::Vector3f V = normalize(-non_projected_vertex_pos);   // toward the camera
+                    float RdotV = std::max(0.0f, getDotProduct(R, V));
+                    i += light.intensity * std::pow(RdotV, specular);
+                }
+            }
+        }
+    
+    // sf::Vector3f n = normalize(non_projected_vertex_pos);
+    // sf::Color normal_color((normal.x * 0.5 + 0.5)*255,(normal.y * 0.5 + 0.5)*255,(normal.z * 0.5 + 0.5)*255);
+
+    // sf::Color grey(150,150,150);
+    // return grey * std::max(0.0f,(getDotProduct(L,normal)));
+    // return normal_color;
+    return color*i;
+}
+
+std::array<float,3> computeLightingPerTriangle(TempTriangle& triangle,std::vector<Light>& lights,float specular,Matrix& camera_translation, Matrix& camera_rotation){
     sf::Vector3f L;
 
     std::array<float,3> intensities{0.0f,0.0f,0.0f};
@@ -326,12 +371,18 @@ std::array<float,3> computeLighting(TempTriangle& triangle,std::vector<Light>& l
             }
             else{
                 if (light.type == LightType::Point){
-                    L = normalize(camera_transform * light.dirOrPos - triangle.vertices[j]);
+                    L = normalize(camera_translation * light.dirOrPos - triangle.vertices[j]);
                 }
                 else if (light.type == LightType::Directional){
-                    L = normalize(camera_rotation * light.dirOrPos);
+                    L = normalize(transformDirection(camera_rotation,light.dirOrPos));
                 }
-                intensities[j] += light.intensity * std::max(0.0f,getDotProduct(triangle.normals[j],L));
+
+                intensities[j] += light.intensity * std::max(0.0f,(getDotProduct(triangle.normals[j],L)));
+                
+                if (specular > 0.0f){
+                    sf::Vector3f R = reflect(L,triangle.normals[j]);
+                    intensities[j] += light.intensity * std::max(0.0f, std::pow(getDotProduct(R,normalize(triangle.vertices[j])),specular));
+                }
             }
         }
     }
@@ -345,7 +396,7 @@ sf::Vector3f canvasToViewPort(int x,int y){
     return sf::Vector3f(Vx,Vy,1);
 }
 
-sf::Vertex getPixel(int x,int y,sf::Color color,DEPTH_BUFFER& depth_buffer,float z_inverse){
+sf::Vertex getPixel(float x,float y,sf::Color color,DEPTH_BUFFER& depth_buffer,float z_inverse){
     float Sx = WIDTH/2 + x;
     float Sy = HEIGHT/2 - y;
 
@@ -474,7 +525,7 @@ Range drawLine(sf::VertexArray& scene,DEPTH_BUFFER& depth_buffer,sf::Vector2f p1
     return {i_start,i_end};
 }
 
-Range drawTriangle(sf::VertexArray& scene,DEPTH_BUFFER& depth_buffer,TempTriangle& triangle,float h0, float h1, float h2,float viewport_z){
+Range drawTriangle(sf::VertexArray& scene,DEPTH_BUFFER& depth_buffer,TempTriangle& triangle,float h0, float h1, float h2,float viewport_z, std::vector<Light>& lights, float specular, Matrix& camera_translation, Matrix& camera_rotation){
     // Project the vertices and get the z values stored in a separate variable for ease.
     sf::Vector2f l0 = projectVector(triangle.vertices[0],viewport_z);
     float z0 = triangle.vertices[0].z;
@@ -484,6 +535,16 @@ Range drawTriangle(sf::VertexArray& scene,DEPTH_BUFFER& depth_buffer,TempTriangl
     float z2 = triangle.vertices[2].z;
     sf::Color color = triangle.color;
 
+    // pre caluclate the inverse of z
+    float iz0 = 1.0f / z0;
+    float iz1 = 1.0f / z1;
+    float iz2 = 1.0f / z2;
+
+    sf::Vector3f n0 = triangle.normals[0] * iz0;
+    sf::Vector3f n1 = triangle.normals[1] * iz1;
+    sf::Vector3f n2 = triangle.normals[2] * iz2;
+    float hiz0 = h0*iz0, hiz1 = h1*iz1, hiz2 = h2*iz2;
+
     // starting the counter for range
     int i_start = scene.getVertexCount() - 1;
 
@@ -492,24 +553,22 @@ Range drawTriangle(sf::VertexArray& scene,DEPTH_BUFFER& depth_buffer,TempTriangl
     // also since h and z are technically properties of these vertices we swap them along with these vertices
     if(l1.y < l0.y){
         swap(l0,l1);
-        swap(h0,h1);
-        swap(z0,z1);
+        swap(hiz0,hiz1);
+        swap(iz0,iz1);
+        swap(n0,n1);
     }
     if(l2.y < l0.y){
         swap(l0,l2);
-        swap(h0,h2);
-        swap(z0,z2);
+        swap(hiz0,hiz2);
+        swap(iz0,iz2);
+        swap(n0,n2);
     }
     if(l2.y < l1.y){
         swap(l1,l2);
-        swap(h1,h2);
-        swap(z1,z2);
+        swap(hiz1,hiz2);
+        swap(iz1,iz2);
+        swap(n1,n2);
     }
-
-    // pre caluclate the inverse of z
-    float iz0 = 1.0f / z0;
-    float iz1 = 1.0f / z1;
-    float iz2 = 1.0f / z2;
 
     // correctly rounding off the float values so we don't get lines shooting from the edges of the cubes
     // though the change is barely visible
@@ -533,16 +592,20 @@ Range drawTriangle(sf::VertexArray& scene,DEPTH_BUFFER& depth_buffer,TempTriangl
     // precalculating slope for every edge of the triangle along with slope for z reciporocal values too
     float dx_02  = (dy_02 != 0.0f) ? (l2.x - l0.x) / dy_02 : 0.0f;
     float diz_02 = (dy_02 != 0.0f) ? (iz2  - iz0 ) / dy_02 : 0.0f;
-    float dh_02 = (dy_02 != 0.0f) ? (h2 - h0) / dy_02 : 0.0f;
+    float dh_02 = (dy_02 != 0.0f) ? (hiz2 - hiz0) / dy_02 : 0.0f;
+    sf::Vector3f dn_02 = (dy_02 != 0.0f) ? (n2 - n0) / dy_02: sf::Vector3f(0,0,0);
     float dx_01  = (dy_01 != 0.0f) ? (l1.x - l0.x) / dy_01 : 0.0f;
     float diz_01 = (dy_01 != 0.0f) ? (iz1  - iz0 ) / dy_01 : 0.0f;
-    float dh_01 = (dy_02 != 0.0f) ? (h1 - h0) / dy_01 : 0.0f;
+    float dh_01 = (dy_01 != 0.0f) ? (hiz1 - hiz0) / dy_01 : 0.0f;
+    sf::Vector3f dn_01 = (dy_01 != 0.0f) ? (n1 - n0) / dy_01: sf::Vector3f(0,0,0);
     float dx_12  = (dy_12 != 0.0f) ? (l2.x - l1.x) / dy_12 : 0.0f;
     float diz_12 = (dy_12 != 0.0f) ? (iz2  - iz1 ) / dy_12 : 0.0f;
-    float dh_12 = (dy_02 != 0.0f) ? (h2 - h1) / dy_12 : 0.0f;
+    float dh_12 = (dy_12 != 0.0f) ? (hiz2 - hiz1) / dy_12 : 0.0f;
+    sf::Vector3f dn_12 = (dy_12 != 0.0f) ? (n2 - n1) / dy_12: sf::Vector3f(0,0,0);
 
     // setting up the x and z values for both ends of the line hence the start and end prefixes
     float x_start, x_end, z_start, z_end, h_start, h_end;
+    sf::Vector3f n_start, n_end;
     for(int y = y_start; y <= y_end; y++){
 
         // we take fy to not get any wierd behaviour in case of int and float operations
@@ -552,31 +615,37 @@ Range drawTriangle(sf::VertexArray& scene,DEPTH_BUFFER& depth_buffer,TempTriangl
         float d02 = fy - l0.y;
         x_start = l0.x +  d02 * dx_02;
         z_start = iz0 + d02  * diz_02;
-        h_start = h0 + d02 * dh_02;
+        h_start = hiz0 + d02 * dh_02;
+        n_start = n0 + d02 * dn_02;
         
         // since we have two edges for x_end we take two cases and calculate x_end
         if(fy >= l1.y){
             float d12 = fy - l1.y;
             x_end = l1.x + d12 * dx_12;
             z_end = iz1 + d12 * diz_12;
-            h_end = h1 + d12 * dh_12;
+            h_end = hiz1 + d12 * dh_12;
+            n_end = n1 + d12 * dn_12;
         }
         else{
             x_end = l0.x + d02 * dx_01;
             z_end = iz0 + d02 * diz_01;
-            h_end = h0 + d02 * dh_01;
+            h_end = hiz0 + d02 * dh_01;
+            n_end = n0 + d02 * dn_01;
         }
 
         // we don't know which side is left or right since our for loop will need that, we create temporary
         // variable and swap them if needed and use those in the for loop
         float x_left = x_start, z_left = z_start, h_left = h_start;
         float x_right = x_end, z_right = z_end, h_right = h_end;
+        sf::Vector3f n_left = n_start;
+        sf::Vector3f n_right = n_end;
 
         // swap the variables to follow our for loop
         if(x_end < x_start){
             swap(x_left,x_right);
             swap(z_left,z_right);
             swap(h_left,h_right);
+            swap(n_left,n_right);
         }
 
         // again using std::ceil and std::floor to take out any weird shooting lines from the edges
@@ -587,6 +656,7 @@ Range drawTriangle(sf::VertexArray& scene,DEPTH_BUFFER& depth_buffer,TempTriangl
         float d_x = x_right - x_left;
         float d_zi = (d_x != 0.0f) ? (z_right - z_left) / (d_x) : 0.0f;
         float d_h = (d_x != 0.0f) ? (h_right - h_left) / (d_x) : 0.0f;
+        sf::Vector3f d_n = (d_x != 0.0f) ? (n_right - n_left) / (d_x) : sf::Vector3f(0,0,0);
         
         // finding z reciprocal for the first step.
         const int half_w = WIDTH / 2;
@@ -601,9 +671,14 @@ Range drawTriangle(sf::VertexArray& scene,DEPTH_BUFFER& depth_buffer,TempTriangl
 
         float iz = z_left + (pixel_x_start - x_left) * d_zi;
         float h = h_left + (pixel_x_start - x_left) * d_h;
+        sf::Vector3f n = n_left + (pixel_x_start - x_left) * d_n;
 
-        for (int x = pixel_x_start; x <= pixel_x_end; ++x, iz += d_zi, h += d_h) {
-            sf::Vertex vertex = getPixel(x,y,color*h,depth_buffer,iz);
+        for (int x = pixel_x_start; x <= pixel_x_end; ++x, iz += d_zi, h += d_h, n += d_n) {
+            float fx = viewport_z * WIDTH/VIEWPORT_W;
+            float fy = viewport_z * HEIGHT/VIEWPORT_H;
+            sf::Vector3f P (x/(fx *iz),y/(fy * iz), 1/iz);
+            sf::Color lighted_color = computeLightingPerVertex(P,normalize(n),color,lights,specular,camera_translation,camera_rotation);
+            sf::Vertex vertex = getPixel(x,y,lighted_color,depth_buffer,iz);
             if(!(vertex.color == sf::Color::Transparent)){
                 scene.append(vertex);
             }
@@ -647,7 +722,7 @@ TempTriangle getTempTriangle(Triangle& triangle, std::vector<sf::Vector3f>& tran
     temp_triangle.vertices[2] = transformed_vertices[triangle.indices[2]];
     temp_triangle.color = triangle.color;
     for(int i = 0; i < 3; i++){
-        temp_triangle.normals[i] = rotation_matrix * triangle.normals[i];
+        temp_triangle.normals[i] = transformDirection(rotation_matrix,triangle.normals[i]);
     }
 
     return temp_triangle;
@@ -839,21 +914,21 @@ int main(){
     sf::Vector3f pointLightPosition(5.0f, 0.0f, -4.0f);
     std::vector<Light> lights;
     lights.emplace_back(Point,0.6,pointLightPosition);
-    lights.emplace_back(Ambient,0.2);
-    lights.emplace_back(Directional,0.4,sf::Vector3f(1,4,4));
+    // lights.emplace_back(Ambient,0.2);
+    // lights.emplace_back(Directional,0.4,sf::Vector3f(1,4,4));
 
     std::vector<std::array<Range,3>> wireframe_ranges;
     std::vector<Range> ranges;
     std::vector<Instance> instances;
     instances.push_back(Instance{&pointLightMarker, pointLightPosition,
                                  {0.0f, 0.0f, 0.0f}, 0.12f});
-    instances.push_back(Instance{&cube, {-3.0f,  2.5f, 15.0f}, {20.0f, 30.0f, 10.0f}, 0.9f});
-    instances.push_back(Instance{&sphere, { 0.0f,  0.0f,  4.0f}, {15.0f, 15.0f,  0.0f}, 1.5f});
-    instances.push_back(Instance{&cube, { 4.0f,  3.0f, -5.0f}, { 0.0f,  0.0f,  0.0f}, 1.0f});
-    instances.push_back(Instance{&cube, { 0.0f,  0.0f,  2.0f}, {30.0f, 45.0f, 15.0f}, 3.0f});
-    instances.push_back(Instance{&cube, { 8.0f,  0.0f, 10.0f}, { 0.0f, 20.0f,  0.0f}, 1.2f});
-    instances.push_back(Instance{&cube, { 0.0f,  6.0f, 10.0f}, {10.0f,  0.0f,  0.0f}, 1.2f});
-    instances.push_back(Instance{&cube, {-6.0f, -4.0f,  0.5f}, {45.0f,  0.0f, 30.0f}, 0.7f});
+    instances.push_back(Instance{&cube, {-3.0f,  2.5f, 15.0f}, {20.0f, 30.0f, 10.0f}, 0.9f,-1});
+    instances.push_back(Instance{&sphere, { 0.0f,  0.0f,  4.0f}, {15.0f, 15.0f,  0.0f}, 1.5f,100});
+    // instances.push_back(Instance{&cube, { 4.0f,  3.0f, -5.0f}, { 0.0f,  0.0f,  0.0f}, 1.0f,-1});
+    // instances.push_back(Instance{&cube, { 0.0f,  0.0f,  2.0f}, {30.0f, 45.0f, 15.0f}, 3.0f,500});
+    instances.push_back(Instance{&cube, { 8.0f,  0.0f, 10.0f}, { 0.0f, 20.0f,  0.0f}, 1.2f,-1});
+    instances.push_back(Instance{&cube, { 0.0f,  6.0f, 10.0f}, {10.0f,  0.0f,  0.0f}, 1.2f,-1});
+    instances.push_back(Instance{&cube, {-6.0f, -4.0f,  0.5f}, {45.0f,  0.0f, 30.0f}, 0.7f,-1});
 
     sf::VertexArray scene(sf::PrimitiveType::Points);
     std::vector<TempTriangle> triangle_buff1, triangle_buff2;
@@ -884,9 +959,9 @@ int main(){
         if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::Down))  camera_pos.y -= 5 * dt;
         if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::W))     camera_pos.z += 5 * dt;
         if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::S))     camera_pos.z -= 5 * dt;
-        if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::F))     camera_orientation[0] += 10 * dt;
-        if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::G))     camera_orientation[1] += 10 * dt;
-        if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::H))     camera_orientation[2] += 10 * dt;
+        if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::F))     camera_orientation[0] += 20 * dt;
+        if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::G))     camera_orientation[1] += 20 * dt;
+        if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::H))     camera_orientation[2] += 20 * dt;
 
         if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::L)) pointLightPosition.x += 5 * dt;
         if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::J))  pointLightPosition.x -= 5 * dt;
@@ -937,7 +1012,8 @@ int main(){
 
                 triangle_buff1.clear();
                 for(auto& triangle:instance.model_ptr->triangles){
-                    TempTriangle temp_triangle = getTempTriangle(triangle,vertices_buff,rotation);
+                    Matrix full_rotation = camera_rotation * rotation;
+                    TempTriangle temp_triangle = getTempTriangle(triangle,vertices_buff,full_rotation);
                     if(isTriangleVisible(temp_triangle)){
                         triangle_buff1.push_back(temp_triangle);
                     }
@@ -950,8 +1026,8 @@ int main(){
                 // }
 
                 for (auto& triangle: triangle_buff1){
-                    auto intensitites = computeLighting(triangle,lights,camera_transform,camera_rotation);
-                    ranges.push_back(drawTriangle(scene,depth_buffer,triangle,intensitites[0],intensitites[1],intensitites[2],viewport_pos.z));
+                    // auto intensitites = computeLightingPerTriangle(triangle,lights,instance.specular,camera_transform,camera_rotation);
+                    ranges.push_back(drawTriangle(scene,depth_buffer,triangle,0,0,0,viewport_pos.z,lights,instance.specular,camera_translation,camera_rotation));
                 }
 
             }
@@ -973,8 +1049,8 @@ int main(){
                 // }
 
                 for (auto& triangle: triangle_buff1){
-                    auto intensitites = computeLighting(triangle,lights,camera_transform,camera_rotation);
-                    ranges.push_back(drawTriangle(scene,depth_buffer,triangle,intensitites[0],intensitites[1],intensitites[2],viewport_pos.z));
+                    // auto intensitites = computeLightingPerTriangle(triangle,lights,instance.specular,camera_transform,camera_rotation);
+                    ranges.push_back(drawTriangle(scene,depth_buffer,triangle,0,0,0,viewport_pos.z,lights,instance.specular,camera_translation,camera_rotation));
                 }
             }
 
